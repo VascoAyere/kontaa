@@ -219,7 +219,11 @@
         <div><label for="sPhone">Shop phone</label><input id="sPhone" type="tel"></div>
         <div><label for="sTin">TIN / Ghana Card (optional)</label><input id="sTin"></div>
       </div>
-      <div class="mb"><label for="sAddr">Location</label><input id="sAddr"></div>
+      <div class="mb"><label for="sAddr">Location</label><input id="sAddr" placeholder="e.g. Madina Market, Accra"></div>
+      <div class="row mb">
+        <div><label for="sGps">GPS address</label><input id="sGps" autocomplete="off" placeholder="GA-123-4567" style="text-transform:uppercase"></div>
+        <div><label for="sEmail">Business email</label><input id="sEmail" type="email" inputmode="email"></div>
+      </div>
       <div class="mb"><label for="sFooter">Message at bottom of receipt</label><input id="sFooter" value="Thank you for your business!"></div>
       <label class="check"><input type="checkbox" id="sVat"> Add VAT and levies (only if you are VAT-registered)</label>
       <div id="vatBox" class="hidden" style="margin-top:8px">
@@ -662,7 +666,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     return /^233[235]\d{8}$/.test(d) ? d : null;
   }
 
-  let shop = store.get("shop", { name: "", phone: "", tin: "", addr: "", footer: "Thank you for your business!", vat: false, vatRate: 20 });
+  let shop = store.get("shop", { name: "", phone: "", tin: "", addr: "", gps: "", email: "", footer: "Thank you for your business!", vat: false, vatRate: 20 });
   let history = store.get("receipts", []);
   let products = store.get("products", []);
   let payReceipts = store.get("payReceipts", []);
@@ -839,7 +843,9 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   function header(L) {
     L.push(shop.name || "My Shop");
     if (shop.addr) L.push(shop.addr);
+    if (shop.gps) L.push("GPS: " + shop.gps);
     if (shop.phone) L.push("Tel: " + shop.phone);
+    if (shop.email) L.push("Email: " + shop.email);
     if (shop.tin) L.push("TIN: " + shop.tin);
     L.push("");
   }
@@ -1259,6 +1265,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   function loadShop() {
     $("sName").value = shop.name; $("sPhone").value = shop.phone; $("sTin").value = shop.tin;
     $("sAddr").value = shop.addr; $("sFooter").value = shop.footer;
+    $("sGps").value = shop.gps || ""; $("sEmail").value = shop.email || "";
     $("sVat").checked = shop.vat; $("sVatRate").value = shop.vatRate;
     $("vatBox").classList.toggle("hidden", !shop.vat);
     $("savedNote").textContent = "";
@@ -1266,10 +1273,16 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   $("sVat").onchange = () => $("vatBox").classList.toggle("hidden", !$("sVat").checked);
   $("saveShop").onclick = () => {
     if (!$("sName").value.trim()) { $("savedNote").textContent = "Enter your business name. It goes at the top of every receipt."; return $("sName").focus(); }
-    shop = { name: $("sName").value.trim(), phone: $("sPhone").value.trim(), tin: $("sTin").value.trim(),
+    // Ghana Post GPS digital address: region letters, then 3-4 digits, then 4 digits (e.g. GA-123-4567).
+    const gps = $("sGps").value.trim().toUpperCase().replace(/\s+/g, "");
+    if (gps && !/^[A-Z]{2}-?\d{3,4}-?\d{4}$/.test(gps)) { $("savedNote").textContent = "That GPS address doesn't look right. It should look like GA-123-4567."; return $("sGps").focus(); }
+    const email = $("sEmail").value.trim();
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { $("savedNote").textContent = "That email address doesn't look right."; return $("sEmail").focus(); }
+    shop = { gps: gps.replace(/^([A-Z]{2})-?(\d{3,4})-?(\d{4})$/, "$1-$2-$3"), email, name: $("sName").value.trim(), phone: $("sPhone").value.trim(), tin: $("sTin").value.trim(),
       addr: $("sAddr").value.trim(), footer: $("sFooter").value.trim(),
       vat: $("sVat").checked, vatRate: parseFloat($("sVatRate").value) || 0 };
     store.set("shop", shop);
+    $("sGps").value = shop.gps;
     $("savedNote").textContent = "Saved.";
     recalc();
   };
