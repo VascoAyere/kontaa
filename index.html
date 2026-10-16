@@ -960,12 +960,26 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     $("sendNote").textContent = "";
     $("pdfStatus").innerHTML = m.pdf
       ? `<div class="ok">✓ Locked PDF ready: ${esc(m.pdf.name)}. Choose how to send it.</div>` +
-        (canSendFiles() ? "" : `<div class="warn mb">This browser can't attach the PDF for you, so sending takes one extra step: the PDF is saved, the chat opens, and you attach it with 📎. To send in one tap, open the app from its web link in Chrome.</div>`)
+        (canSendFiles() ? "" : inAppBrowser
+          ? `<div class="warn mb">You're in an app's built-in browser, which can't attach the PDF. ${isAndroid ? `<a href="intent://${location.host}${location.pathname}#Intent;scheme=https;package=com.android.chrome;end">Open Kontaa in Chrome</a>` : "Tap ⋯ and choose Open in Safari"} for one-tap sending. Until then: the PDF is saved, WhatsApp opens, and you attach it with 📎.</div>`
+          : `<div class="warn mb">This browser can't attach the PDF for you, so sending takes one extra step: the PDF is saved, the chat opens, and you attach it with 📎. Chrome on Android or Safari on iPhone attach it in one tap.</div>`)
       : "";
     $("openPdf").classList.toggle("hidden", !m.pdf);
     show("receipt");
   }
 
+  const UA = navigator.userAgent;
+  const isAndroid = /Android/i.test(UA), isIOS = /iPhone|iPad|iPod/i.test(UA);
+  // In-app browsers (opening the link from Claude, WhatsApp, Facebook, Instagram...) can't attach files
+  // and open WhatsApp inside themselves. Android WebViews mark themselves with "; wv)".
+  const inAppBrowser = /; wv\)|FBAN|FBAV|Instagram|Line\/|WhatsApp|Snapchat|GSA\//i.test(UA);
+  // A link that opens the WhatsApp app itself rather than a web page inside this browser.
+  function whatsappUrl(phone, text) {
+    const q = (phone ? "phone=" + phone : "") + (text ? (phone ? "&" : "") + "text=" + encodeURIComponent(text) : "");
+    if (isAndroid) return `intent://send?${q}#Intent;scheme=whatsapp;package=com.whatsapp;S.browser_fallback_url=${encodeURIComponent("https://wa.me/" + (phone || "") + (text ? "?text=" + encodeURIComponent(text) : ""))};end`;
+    if (isIOS) return `whatsapp://send?${q}`;
+    return (phone ? `https://wa.me/${phone}` : "https://wa.me/") + (text ? "?text=" + encodeURIComponent(text) : "");
+  }
   function canSendFiles() {
     try { return !!(navigator.canShare && navigator.canShare({ files: [new File(["x"], "t.pdf", { type: "application/pdf" })] })); }
     catch { return false; }
@@ -1012,7 +1026,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   $("sendWa").onclick = () => {
     const r = phoneOrWarn(); if (!r) return;
     sendPdfVia("whatsapp", "WhatsApp", (withText) =>
-      openExternal((r.p ? `https://wa.me/${r.p}` : "https://wa.me/") + (withText ? "?text=" + encodeURIComponent(msg.text) : ""), true));
+      openExternal(whatsappUrl(r.p, withText ? msg.text : ""), !isAndroid && !isIOS));
   };
   // A PDF through Messages goes as MMS/RCS; plain SMS can't carry files.
   $("sendSms").onclick = () => {
