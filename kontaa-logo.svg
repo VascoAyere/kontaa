@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+  <title>Kontaa</title>
+  <rect width="120" height="120" rx="26" fill="#0E6B5C"/>
+  <!-- a till slip with a torn edge -->
+  <path d="M34 22 H86 V92 L80 98 L73 92 L66 98 L60 92 L54 98 L47 92 L40 98 L34 92 Z" fill="#FBF7EE"/>
+  <rect x="43" y="34" width="34" height="5" rx="2.5" fill="#0E6B5C" opacity=".35"/>
+  <rect x="43" y="45" width="24" height="5" rx="2.5" fill="#0E6B5C" opacity=".35"/>
+  <!-- gold tick: paid -->
+  <path d="M45 67 L56 78 L77 56" fill="none" stroke="#E8A317" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
