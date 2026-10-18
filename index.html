@@ -1065,28 +1065,64 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
         $("sendNote").innerHTML += ` WhatsApp didn't open? <a href="${esc(waMe(r.p, withText ? msg.text : ""))}" target="_blank" rel="noopener">Open WhatsApp</a>.`;
       });
     }
-    // Computer: a share window can't reach WhatsApp Web, so save the PDF and let the owner pick.
-    const text = msg.pdf ? "" : msg.text;
-    if (msg.pdf) savePdf(msg.pdf);
-    const q = waQuery(r.p, text);
-    $("sendNote").innerHTML =
-      (msg.pdf ? `Saved <b>${esc(msg.pdf.name)}</b> to Downloads. ` : "") + `Open the chat in:
-      <span style="display:flex;gap:8px;margin:8px 0;flex-wrap:wrap">
-        <a href="https://web.whatsapp.com/send${q}" target="_blank" rel="noopener"><button class="primary small" type="button">WhatsApp Web</button></a>
-        <a href="whatsapp://send${q}"><button class="small" type="button">WhatsApp app</button></a>
-      </span>` +
-      (msg.pdf ? `Then tap 📎 (attach) > Document, pick ${esc(msg.pdf.name)}, and send.` : "");
-    sent("whatsapp");
+    const text = msg.pdf ? "" : msg.text, q = waQuery(r.p, text);
+    sendOnComputer("whatsapp", "WhatsApp", [
+      { key: "web", label: "WhatsApp Web", url: `https://web.whatsapp.com/send${q}`, web: true },
+      { key: "app", label: "WhatsApp desktop app", url: `whatsapp://send${q}` }
+    ]);
   };
+
+  // On a computer the share window can't reach WhatsApp Web or Gmail, so every option saves the
+  // PDF and opens the chosen site in ONE reused browser tab (named per app), so a second send goes
+  // to the tab Kontaa already opened. The owner's last choice becomes the default.
+  function sendOnComputer(ch, appName, opts) {
+    const pref = store.get("pref-" + ch, opts[0].key);
+    const main = opts.find(o => o.key === pref) || opts[0];
+    if (msg.pdf) savePdf(msg.pdf);
+    const go = (o) => {
+      store.set("pref-" + ch, o.key);
+      if (o.web) { const w = window.open(o.url, "kontaa-" + ch); if (w) { try { w.focus(); } catch {} return true; } return false; }
+      openExternal(o.url); return true;
+    };
+    const render = (cur, opened) => {
+      $("sendNote").innerHTML =
+        (msg.pdf ? `Saved <b>${esc(msg.pdf.name)}</b> to Downloads. ` : "") +
+        (opened ? `Opened ${esc(cur.label)}.` : `Your browser blocked the new tab.`) +
+        (msg.pdf ? ` Attach the PDF there (📎 or the paperclip), then send.` : "") +
+        `<span style="display:flex;gap:8px;margin:8px 0;flex-wrap:wrap">` +
+        (opened ? "" : `<button class="primary small" type="button" data-o="${cur.key}">Open ${esc(cur.label)}</button>`) +
+        opts.filter(o => o !== cur).map(o => `<button class="small" type="button" data-o="${o.key}">Use ${esc(o.label)} instead</button>`).join("") + `</span>`;
+      $("sendNote").querySelectorAll("button[data-o]").forEach(btn => btn.onclick = () => {
+        const o = opts.find(x => x.key === btn.dataset.o); render(o, go(o));
+      });
+    };
+    render(main, go(main));
+    sent(ch);
+  }
   // A PDF through Messages goes as MMS/RCS; plain SMS can't carry files.
   $("sendSms").onclick = () => {
     const r = phoneOrWarn(); if (!r) return;
+    if (!isPhone) {
+      // Computers can't send SMS themselves; Windows hands sms: links to Phone Link if it's set up.
+      openExternal(`sms:${r.p ? "+" + r.p : ""}?body=${encodeURIComponent(msg.sms)}`);
+      $("sendNote").innerHTML = `SMS has to go out from a phone. If Phone Link (Windows) or Messages (Mac) opened, press send there. ` +
+        `If nothing opened, use <b>Copy text</b> below and send it from your phone, or send the PDF by WhatsApp or email instead.`;
+      return sent("sms");
+    }
     const sep = /iPhone|iPad|iPod/.test(navigator.userAgent) ? "&" : "?";  // iOS wants "&body="
     sendPdfVia("sms", "Messages", (withText) =>
       openExternal(`sms:${r.p ? "+" + r.p : ""}` + (withText ? `${sep}body=${encodeURIComponent(msg.sms)}` : "")));
   };
   $("sendEmail").onclick = () => {
     const to = $("toEmail").value.trim();
+    if (!isPhone) {
+      const body = msg.pdf ? "Please find your receipt attached as a PDF." : msg.text, e = encodeURIComponent;
+      return sendOnComputer("email", "email", [
+        { key: "gmail", label: "Gmail", web: true, url: `https://mail.google.com/mail/?view=cm&fs=1&to=${e(to)}&su=${e(msg.subject)}&body=${e(body)}` },
+        { key: "outlook", label: "Outlook.com", web: true, url: `https://outlook.live.com/mail/0/deeplink/compose?to=${e(to)}&subject=${e(msg.subject)}&body=${e(body)}` },
+        { key: "app", label: "my email app", url: `mailto:${e(to)}?subject=${e(msg.subject)}&body=${e(body)}` }
+      ]);
+    }
     sendPdfVia("email", "your email app", (withText) =>
       openExternal(`mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(msg.subject)}&body=` +
         encodeURIComponent(withText ? msg.text : "Please find your receipt attached as a PDF.")));
