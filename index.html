@@ -219,6 +219,8 @@
       </div>
       <p class="note mb" id="periodLabel"></p>
       <div class="stats" id="stats"></div>
+      <button class="primary" id="closeDay" style="width:100%;margin-bottom:4px">Close the day</button>
+      <p class="note">Makes a locked PDF report of this period to send to the owner.</p>
       <div id="dash"></div>
     </div>
     <div class="card">
@@ -228,7 +230,7 @@
     </div>
     <div class="card">
       <h2>Check a receipt</h2>
-      <p class="note mb">A customer shows you a receipt? Type its verification code to see the original you issued.</p>
+      <p class="note mb">A customer shows you a receipt, or you want to check a day report? Type its verification code.</p>
       <div class="send2"><input id="vCode" placeholder="e.g. 3F9A-21C0-7B44" autocomplete="off"><button id="vBtn">Check</button></div>
       <div id="vResult" style="margin-top:10px"></div>
     </div>
@@ -248,6 +250,7 @@
         <div><label for="sGps">GPS address</label><input id="sGps" autocomplete="off" placeholder="GA-123-4567" style="text-transform:uppercase"></div>
         <div><label for="sEmail">Business email</label><input id="sEmail" type="email" inputmode="email"></div>
       </div>
+      <div class="mb"><label for="sOwner">Owner's WhatsApp number, for end-of-day reports</label><input id="sOwner" type="tel" inputmode="tel" placeholder="e.g. 024 412 3456"></div>
       <div class="mb"><label for="sFooter">Message at bottom of receipt</label><input id="sFooter" value="Thank you for your business!"></div>
       <label class="check"><input type="checkbox" id="sVat"> Add VAT and levies (only if you are VAT-registered)</label>
       <div id="vatBox" class="hidden" style="margin-top:8px">
@@ -1324,6 +1327,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       $("periods").appendChild(b);
     });
     $("customRange").classList.toggle("hidden", period !== "custom");
+    $("closeDay").textContent = period === "today" ? "Close the day" : period === "yesterday" ? "Send yesterday's report" : "Send this period's report";
     if (period === "custom" && !$("dFrom").value) { $("dFrom").value = isoDay(addDays(new Date(), -6)); $("dTo").value = isoDay(new Date()); }
     const [from, to] = periodRange(period), days = Math.round((to - from) / DAY);
     vsLabel = days === 1 ? "day before" : `previous ${days} days`;
@@ -1372,6 +1376,55 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     if (!S.count) $("histList").innerHTML = `<li class="note">${history.length ? "No receipts in this period." : "No sales yet."}</li>`;
   }
   ["dFrom", "dTo"].forEach(id => $(id).addEventListener("change", renderHistory));
+
+  // ---------- close the day ----------
+  // A locked PDF report of the period shown on the dashboard, with a verification code so the
+  // owner can tell if it was edited, and the receipt-number range so deleted sales show as gaps.
+  let closings = store.get("closings", []);
+  const recNo = (no) => parseInt(String(no).replace(/\D/g, ""), 10);
+  $("closeDay").onclick = async () => {
+    const [from, to] = periodRange(period), S = summarize(from, to);
+    const nums = S.sales.map(r => recNo(r.no)).sort((a, b) => a - b);
+    const have = new Set(history.map(r => recNo(r.no)));
+    const missing = [];
+    for (let n = nums[0]; nums.length && n <= nums[nums.length - 1]; n++) if (!have.has(n)) missing.push("R-" + String(n).padStart(5, "0"));
+    const isDay = period === "today" || period === "yesterday";
+    const rep = { kind: isDay ? "day" : "period", label: $("periodLabel").textContent, made: new Date().toISOString(),
+      first: S.sales.length ? "R-" + String(nums[0]).padStart(5, "0") : "", last: S.sales.length ? "R-" + String(nums[nums.length - 1]).padStart(5, "0") : "",
+      count: S.count, total: S.total, moneyIn: S.moneyIn, debtIn: S.debtIn, credit: S.credit, owing: S.stillOwing,
+      methods: [...S.methods].sort((a, b) => b[1] - a[1]), missing };
+    rep.code = await fingerprint(rep);
+    closings.unshift(rep); store.set("closings", closings.slice(0, 400));
+    const L = [];
+    header(L);
+    L.push(isDay ? "END OF DAY REPORT" : "SALES REPORT");
+    L.push(rep.label);
+    L.push("Made " + new Date(rep.made).toLocaleString("en-GH", { dateStyle: "medium", timeStyle: "short" }));
+    L.push("");
+    L.push(`Receipts: ${S.count}` + (S.count ? ` (${rep.first} to ${rep.last})` : ""));
+    if (missing.length) L.push(`WARNING: missing receipt numbers ${missing.slice(0, 10).join(", ")}${missing.length > 10 ? " and " + (missing.length - 10) + " more" : ""}`);
+    L.push(`Sales value: ${cedi(S.total)}`);
+    L.push(`Money received: ${cedi(S.moneyIn)}`);
+    if (S.debtIn) L.push(`  incl. old debts paid: ${cedi(S.debtIn)}`);
+    rep.methods.forEach(([m, v]) => L.push(`  ${m}: ${cedi(v)}`));
+    if (S.credit) L.push(`Sold on credit: ${cedi(S.credit)}`);
+    if (S.stillOwing) L.push(`Still owing from these sales: ${cedi(S.stillOwing)}`);
+    if (S.items.length) {
+      L.push(""); L.push("Top items:");
+      S.items.slice(0, 5).forEach(i => L.push(`  ${i.name} x${r2(i.qty)}: ${cedi(i.value)}`));
+    }
+    L.push(""); L.push("Verification code: " + rep.code);
+    const text = L.join("\n");
+    const stamp = isoDay(from) + (isDay ? "" : "-to-" + isoDay(addDays(to, -1)));
+    const pdf = makePdf(`${bizName()} ${isDay ? "End of day report" : "Sales report"} ${rep.label}`, text, `${fileBiz()}-${isDay ? "Day-Report" : "Sales-Report"}-${stamp}.pdf`);
+    openMessage({
+      title: `${bizName()} · ${isDay ? "End of day" : "Sales report"}`, text,
+      sms: `${shop.name || "Shop"} ${isDay ? "day" : "sales"} report ${rep.label}: ${S.count} receipts, sales ${cedi(S.total)}, money in ${cedi(S.moneyIn)}` +
+        (S.credit ? `, credit ${cedi(S.credit)}` : "") + (missing.length ? `. ${missing.length} receipt number(s) MISSING` : "") + `. Code ${rep.code}`,
+      subject: `${isDay ? "End of day report" : "Sales report"}: ${shop.name || "shop"}, ${rep.label}`,
+      phone: shop.owner || "", email: shop.email || "", pdf
+    });
+  };
   $("exportCsv").onclick = () => {
     const q = (s) => `"${String(s ?? "").replace(/"/g, '""')}"`;
     const rows = [["receipt", "date", "customer", "phone", "email", "items", "subtotal", "discount", "tax", "total", "paid", "owing", "paid_by", "reference"]];
@@ -1394,6 +1447,11 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       box.innerHTML = ok ? `<div class="ok">✓ Genuine: receipt ${r.no}, ${fmtDate(r.date)}, total ${cedi(r.total)}. Compare the items and amounts below with what the customer shows you.</div>`
         : `<div class="warn">The saved record for ${r.no} has been changed on this phone.</div>`;
       if (ok) box.insertAdjacentHTML("beforeend", `<pre class="receipt" style="margin-top:8px">${esc(receiptText(r))}</pre>`);
+    } else if (closings.find(c => c.code === code)) {
+      const c = closings.find(x => x.code === code), { code: _, ...facts } = c;
+      const ok = (await fingerprint(facts)) === c.code;
+      box.innerHTML = ok ? `<div class="ok">✓ Genuine report for ${esc(c.label)}: ${c.count} receipts, sales ${cedi(c.total)}, money received ${cedi(c.moneyIn)}.${c.missing.length ? ` It flagged ${c.missing.length} missing receipt number(s).` : ""}</div>`
+        : `<div class="warn">The saved copy of this report has been changed on this phone.</div>`;
     } else if (pr) {
       box.innerHTML = `<div class="ok">✓ Genuine: payment receipt ${pr.no}, ${fmtDate(pr.date)}, ${cedi(pr.amount)} received.</div>`;
     } else {
@@ -1405,7 +1463,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   function loadShop() {
     $("sName").value = shop.name; $("sPhone").value = shop.phone; $("sTin").value = shop.tin;
     $("sAddr").value = shop.addr; $("sFooter").value = shop.footer;
-    $("sGps").value = shop.gps || ""; $("sEmail").value = shop.email || "";
+    $("sGps").value = shop.gps || ""; $("sEmail").value = shop.email || ""; $("sOwner").value = shop.owner || "";
     $("sVat").checked = shop.vat; $("sVatRate").value = shop.vatRate;
     $("vatBox").classList.toggle("hidden", !shop.vat);
     $("savedNote").textContent = "";
@@ -1418,7 +1476,9 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     if (gps && !/^[A-Z]{2}-?\d{3,4}-?\d{4}$/.test(gps)) { $("savedNote").textContent = "That GPS address doesn't look right. It should look like GA-123-4567."; return $("sGps").focus(); }
     const email = $("sEmail").value.trim();
     if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { $("savedNote").textContent = "That email address doesn't look right."; return $("sEmail").focus(); }
-    shop = { gps: gps.replace(/^([A-Z]{2})-?(\d{3,4})-?(\d{4})$/, "$1-$2-$3"), email, name: $("sName").value.trim(), phone: $("sPhone").value.trim(), tin: $("sTin").value.trim(),
+    const owner = $("sOwner").value.trim();
+    if (owner && !ghPhone(owner)) { $("savedNote").textContent = "The owner's number doesn't look like a Ghana mobile number."; return $("sOwner").focus(); }
+    shop = { owner, gps: gps.replace(/^([A-Z]{2})-?(\d{3,4})-?(\d{4})$/, "$1-$2-$3"), email, name: $("sName").value.trim(), phone: $("sPhone").value.trim(), tin: $("sTin").value.trim(),
       addr: $("sAddr").value.trim(), footer: $("sFooter").value.trim(),
       vat: $("sVat").checked, vatRate: parseFloat($("sVatRate").value) || 0 };
     store.set("shop", shop);
