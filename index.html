@@ -90,6 +90,13 @@
   .stat.big .up, .stat.big .down { color: inherit; }
   .chip.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   .dash-h { font-size: 14px; font-weight: 600; margin: 14px 0 6px; }
+  .mt { margin-top: 8px; }
+  .step { display: flex; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+  .step > div { flex: 1; min-width: 0; }
+  .step .num { flex: none; width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-weight: 700; font-size: 14px; }
+  .step .num.done { background: var(--chip); color: var(--accent); }
+  details.more { border-top: 1px solid var(--line); padding-top: 12px; }
+  details summary { cursor: pointer; color: var(--accent); font-weight: 600; font-size: 14px; }
   .bars { display: flex; align-items: flex-end; gap: 3px; height: 110px; border-bottom: 1px solid var(--line); }
   .bars div { flex: 1; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 1px; }
   .bars div.zero { background: var(--line); }
@@ -1828,21 +1835,32 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       $("accOn").onclick = turnOn;
       return;
     }
-    const p = store.get("pin", null);
+    const p = store.get("pin", null), counter = sync.role === "counter";
+    const pinForm = `<div class="send2 mt"><input id="accPin" type="password" inputmode="numeric" maxlength="8" placeholder="${p ? "New PIN" : "4 to 8 digits"}" autocomplete="new-password"><button class="${p ? "" : "primary"}" id="accPinSave">${p ? "Change PIN" : "Set PIN"}</button></div>`;
+    const linkBtns = `<div class="send2 mt"><button class="${counter ? "primary" : ""}" id="accSend">WhatsApp it to me</button><button id="accCopy">Copy link</button></div>`;
     box.innerHTML = `
-      <p class="mb"><span class="${syncErr ? "down" : "up"}">●</span> ${syncErr ? "Not updated: " + esc(syncErr) : "Online. Updated " + ago(sync.last) + "."}
-        This phone is the <b>${sync.role === "owner" ? "owner's phone" : "shop counter"}</b>.</p>
-      <div class="dash-h">Link the owner's phone</div>
-      <p class="note mb">Open this link on the owner's phone and choose "Owner's phone". Anyone with the link can see your sales, so send it only to yourself and keep it: it is also how you get your data back if a phone is lost.</p>
-      <div class="send2 mb"><button class="primary" id="accSend">Send link on WhatsApp</button><button id="accCopy">Copy link</button></div>
-      <div class="dash-h">Owner PIN</div>
-      <p class="note mb">${p ? "Set. The counter phone asks for it before opening Sales and Shop." : "Not set. Set one so an attendant can't open Sales or change shop details on the counter phone."}</p>
-      <div class="send2 mb"><input id="accPin" type="password" inputmode="numeric" maxlength="8" placeholder="${p ? "New PIN" : "4 to 8 digits"}" autocomplete="off"><button id="accPinSave">${p ? "Change PIN" : "Set PIN"}</button></div>
-      <div class="dash-h">This phone is</div>
-      <div class="send2 mb"><button id="accCounter" class="${sync.role === "counter" ? "primary" : ""}">Shop counter</button><button id="accOwner" class="${sync.role === "owner" ? "primary" : ""}">Owner's phone</button></div>
-      <p class="note mb">The counter makes sales. The owner's phone shows sales, owing and reports, and can record payments. Only one phone should make sales.</p>
-      <div class="send2"><button id="accSync">Update now</button><button id="accOff">Turn off on this phone</button></div>
-      <p class="note" id="accErr"></p>`;
+      <p class="mb"><span class="${syncErr ? "down" : "up"}">●</span> ${syncErr ? "Not updated: " + esc(syncErr) : "On. Updated " + ago(sync.last) + "."}</p>
+      ${counter ? `
+      <div class="step"><span class="num${p ? " done" : ""}">${p ? "✓" : "1"}</span><div>
+        <b>${p ? "Owner PIN is set" : "Set your owner PIN"}</b>
+        <p class="note">${p ? "Attendants only see Sell, Products and Owing. Tap Owner at the top and enter the PIN to see everything." : "Without it, anyone using this phone can see your sales and this link."}</p>
+        ${p ? `<details class="mt"><summary>Change PIN</summary>${pinForm}</details>` : pinForm}
+      </div></div>
+      <div class="step"><span class="num">2</span><div>
+        <b>Open Kontaa on your own phone</b>
+        <p class="note">Send yourself this link and open it on your phone. You'll see sales live from anywhere. Keep it private: anyone with it can see your sales.</p>
+        ${linkBtns}
+      </div></div>` : `
+      <p class="mb">This is the <b>owner's phone</b>. It shows sales and owing as they happen at the counter. Sales are made on the counter phone.</p>`}
+      <details class="more"><summary>More options</summary>
+        ${counter ? "" : `<div class="dash-h">Owner link</div><p class="note">Use it to add another phone, or to get your data back if a phone is lost. Keep it private.</p>${linkBtns}
+        <div class="dash-h">Owner PIN</div><p class="note">${p ? "Set." : "Not set."} It locks Sales and Shop on the counter phone.</p>${pinForm}`}
+        <div class="dash-h">What this phone does</div>
+        <div class="send2"><button id="accCounter" class="${counter ? "primary" : ""}">Makes sales</button><button id="accOwner" class="${counter ? "" : "primary"}">Owner's phone</button></div>
+        <p class="note">Only one phone should make sales, or receipt numbers can repeat.</p>
+        <div class="send2 mt"><button id="accSync">Update now</button><button id="accOff">Turn off on this phone</button></div>
+      </details>
+      <p class="note mt" id="accErr"></p>`;
     $("accSend").onclick = () => {
       const o = ghPhone(shop.owner || "");
       const text = `Kontaa owner link for ${shop.name || "my shop"}. Open on the owner's phone only: ${joinLink()}`;
