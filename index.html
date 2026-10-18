@@ -51,6 +51,9 @@
   button.icon { padding: 10px 0; color: var(--danger); }
   button.small { padding: 6px 10px; font-size: 14px; }
   .full { width: 100%; }
+  .modal { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 50; }
+  .modal.hidden { display: none; }
+  .modal-card { width: 100%; max-width: 420px; margin: 0; }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
   .chip { background: var(--chip); border: 1px solid var(--line); border-radius: 18px; padding: 7px 12px; font-size: 14px; }
   .chip small { color: var(--muted); }
@@ -217,6 +220,7 @@
         <label>From<input type="date" id="dFrom"></label>
         <label>To<input type="date" id="dTo"></label>
       </div>
+      <p class="note" id="syncLine"></p>
       <p class="note mb" id="periodLabel"></p>
       <div class="stats" id="stats"></div>
       <button class="primary" id="closeDay" style="width:100%;margin-bottom:4px">Close the day</button>
@@ -261,9 +265,16 @@
       <button class="primary full" id="saveShop" style="margin-top:12px">Save</button>
       <p class="note" id="savedNote"></p>
     </div>
+    <div class="card" id="accessCard">
+      <h2>Owner access</h2>
+      <div id="accessBody"></div>
+    </div>
   </section>
 </main>
 
+<div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+  <div class="card modal-card" id="modalBody"></div>
+</div>
 <nav class="tabs no-print">
   <button data-view="new">Sell</button>
   <button data-view="products">Products</button>
@@ -675,9 +686,10 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
+  let onStoreSet = () => {};   // replaced by the sync section below
   const store = {
     get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
-    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} onStoreSet(k); }
   };
   const r2 = (n) => Math.round(n * 100) / 100;
   const cedi = (n) => "GH₵" + r2(n).toLocaleString("en-GH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -709,7 +721,11 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 
   // ---------- views ----------
   const titles = { new: "New sale", receipt: "Send", products: "Products", owing: "Owing", history: "Sales", settings: "Your shop" };
-  function show(view) {
+  let currentView = "new";
+  function show(view, quiet) {
+    if (view === "new" && sync && sync.role === "owner") view = "history";
+    if (needsPin(view)) return askPin(() => show(view));
+    currentView = view;
     for (const v of Object.keys(titles)) $("view-" + v).classList.toggle("hidden", v !== view);
     document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("on", b.dataset.view === view || (view === "receipt" && b.dataset.view === "new")));
     $("title").textContent = (shop.name ? shop.name + " · " : "") + titles[view];
@@ -719,7 +735,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     if (view === "owing") renderOwing();
     if (view === "new") renderChips();
     fillCustomerList();
-    window.scrollTo(0, 0);
+    if (!quiet) window.scrollTo(0, 0);
   }
   document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => show(b.dataset.view));
 
@@ -1485,7 +1501,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       li.querySelector("button").onclick = () => openReceipt(r);
       $("histList").appendChild(li);
     });
-    if (!S.count) $("histList").innerHTML = `<li class="note">${history.length ? "No receipts in this period." : "No sales yet."}</li>`;
+    if (!S.count) $("histList").innerHTML = `<li class="note">${history.length ? "No receipts in this period." : "No sales yet."}</li>`;    renderSyncLine();
   }
   ["dFrom", "dTo"].forEach(id => $(id).addEventListener("change", renderHistory));
 
@@ -1573,12 +1589,13 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 
   // ---------- settings ----------
   function loadShop() {
-    $("sName").value = shop.name; $("sPhone").value = shop.phone; $("sTin").value = shop.tin;
-    $("sAddr").value = shop.addr; $("sFooter").value = shop.footer;
+    $("sName").value = shop.name || ""; $("sPhone").value = shop.phone || ""; $("sTin").value = shop.tin || "";
+    $("sAddr").value = shop.addr || ""; $("sFooter").value = shop.footer ?? "";
     $("sGps").value = shop.gps || ""; $("sEmail").value = shop.email || ""; $("sOwner").value = shop.owner || "";
-    $("sVat").checked = shop.vat; $("sVatRate").value = shop.vatRate;
+    $("sVat").checked = !!shop.vat; $("sVatRate").value = shop.vatRate ?? 20;
     $("vatBox").classList.toggle("hidden", !shop.vat);
     $("savedNote").textContent = "";
+    renderAccess();
   }
   $("sVat").onchange = () => $("vatBox").classList.toggle("hidden", !$("sVat").checked);
   $("saveShop").onclick = () => {
@@ -1599,11 +1616,302 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     recalc();
   };
 
+  // ---------- owner access: encrypted sync between phones ----------
+  // Each shop has a random key made on the first phone. Every record (receipt, payment, product list,
+  // shop details) is locked with that key BEFORE it goes online, so the database only ever holds
+  // scrambled data. Other phones get the key through the "link this phone" link (after "#", so it is
+  // never sent to any server). The database only sees a token derived from the key.
+  let sync = store.get("sync", null);         // { shop, key, token, role: "counter"|"owner", seq, at:{}, last, creator }
+  let pushed = store.get("syncPushed", {});    // record key -> fingerprint of what this phone last sent
+  let applyingRemote = false, syncTimer = null, syncing = false, syncAgain = false, syncErr = "";
+  const SYNCED = { receipts: 1, products: 1, payReceipts: 1, closings: 1, shop: 1, pin: 1 };
+  onStoreSet = (k) => {
+    if (applyingRemote || !SYNCED[k] || !sync) return;
+    if (k === "products" || k === "shop" || k === "pin") { sync.at[k] = Date.now(); store.set("sync", sync); }
+    clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, 1500);
+  };
+  const fromB64 = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
+  const quickHash = (str) => { let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (let i = 0; i < str.length; i++) { const c = str.charCodeAt(i); h1 = Math.imul(h1 ^ c, 2654435761); h2 = Math.imul(h2 ^ c, 1597334677); }
+    return (h1 >>> 0).toString(36) + (h2 >>> 0).toString(36); };
+  let cryptoKey = null;
+  async function shopKey() {
+    if (!cryptoKey) cryptoKey = await crypto.subtle.importKey("raw", fromB64(sync.key), "AES-GCM", false, ["encrypt", "decrypt"]);
+    return cryptoKey;
+  }
+  async function seal(obj) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await shopKey(), new TextEncoder().encode(JSON.stringify(obj))));
+    const all = new Uint8Array(12 + ct.length); all.set(iv); all.set(ct, 12);
+    return toB64(all);
+  }
+  async function unseal(d) {
+    const all = fromB64(d);
+    return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: all.slice(0, 12) }, await shopKey(), all.slice(12))));
+  }
+  async function tokenFor(keyB64) {
+    const k = fromB64(keyB64), tag = new TextEncoder().encode("kontaa-sync|"), b = new Uint8Array(tag.length + k.length);
+    b.set(tag); b.set(k, tag.length);
+    return b64url(new Uint8Array(await crypto.subtle.digest("SHA-256", b)));
+  }
+  async function rpc(fn, args) {
+    const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 25000);
+    try {
+      const res = await fetch(SB_URL + "/rest/v1/rpc/" + fn, { method: "POST", signal: ctl.signal,
+        headers: { apikey: SB_KEY, "Content-Type": "application/json" }, body: JSON.stringify(args) });
+      const txt = await res.text();
+      if (!res.ok) throw new Error(/wrong key|unknown shop/.test(txt) ? "This phone's shop link isn't valid any more." : "Server said " + res.status);
+      return txt ? JSON.parse(txt) : null;
+    } finally { clearTimeout(t); }
+  }
+  // Everything this phone holds, as sync records.
+  function localRecords() {
+    const out = {};
+    history.forEach(r => out["r:" + (r.code || r.no)] = r);
+    payReceipts.forEach(p => out["p:" + (p.code || p.no)] = p);
+    closings.forEach(c => out["c:" + c.code] = c);
+    out["products"] = { at: sync.at.products || 0, list: products };
+    out["shop"] = { at: sync.at.shop || 0, shop };
+    out["pin"] = { at: sync.at.pin || 0, pin: store.get("pin", null) };
+    out["secret"] = { secret };
+    return out;
+  }
+  // Two copies of one receipt: keep every payment either phone recorded.
+  function mergeReceipt(a, b) {
+    const seen = new Set(), payments = [];
+    [...(a.payments || []), ...(b.payments || [])].forEach(p => {
+      const k = p.date + "|" + p.amount + "|" + p.method; if (!seen.has(k)) { seen.add(k); payments.push(p); }
+    });
+    payments.sort((x, y) => x.date < y.date ? -1 : 1);
+    const paidAtSale = a.paidAtSale ?? b.paidAtSale ?? a.paid;
+    return { ...a, payments, paidAtSale, paid: r2(paidAtSale + payments.reduce((s, p) => s + p.amount, 0)),
+      sentVia: [...new Set([...(a.sentVia || []), ...(b.sentVia || [])])] };
+  }
+  function applyRemote(k, v) {
+    if (k.startsWith("r:")) {
+      const i = history.findIndex(r => "r:" + (r.code || r.no) === k);
+      if (i < 0) history.push(v); else history[i] = mergeReceipt(history[i], v);
+      store.set("seq", Math.max(store.get("seq", 0), parseInt(String(v.no).replace(/\D/g, ""), 10) || 0));
+    } else if (k.startsWith("p:")) {
+      if (!payReceipts.some(p => "p:" + (p.code || p.no) === k)) payReceipts.push(v);
+      store.set("pseq", Math.max(store.get("pseq", 0), parseInt(String(v.no).replace(/\D/g, ""), 10) || 0));
+    } else if (k.startsWith("c:")) {
+      if (!closings.some(c => c.code === v.code)) closings.push(v);
+    } else if (k === "products" && v.at > (sync.at.products || 0)) { products = v.list; sync.at.products = v.at; }
+    else if (k === "shop" && v.at > (sync.at.shop || 0)) { shop = v.shop; sync.at.shop = v.at; }
+    else if (k === "pin" && v.at > (sync.at.pin || 0)) { store.set("pin", v.pin); sync.at.pin = v.at; }
+    else if (k === "secret" && v.secret !== secret && !sync.creator) { secret = v.secret; store.set("secret", secret); }
+  }
+  async function syncNow() {
+    if (!sync || !navigator.onLine && syncErr) return;
+    if (syncing) { syncAgain = true; return; }
+    syncing = true;
+    try {
+      // 1. Pull what other phones sent.
+      let got = 0, rows;
+      do {
+        rows = await rpc("sync_get", { p_shop: sync.shop, p_token: sync.token, p_since: sync.seq || 0 }) || [];
+        if (rows.length) {
+          const vals = [];
+          for (const row of rows) { try { vals.push([row.k, await unseal(row.d)]); } catch { /* not ours / damaged: skip */ } }
+          applyingRemote = true;
+          try {
+            // Remember what the server holds; if merging changed a receipt, step 2 sends the merged copy back.
+            vals.forEach(([k, v]) => { pushed[k] = quickHash(JSON.stringify(v)); applyRemote(k, v); });
+            history.sort((a, b) => a.date < b.date ? 1 : -1);
+            payReceipts.sort((a, b) => a.date < b.date ? 1 : -1);
+            closings.sort((a, b) => a.made < b.made ? 1 : -1);
+            saveHistory(); saveProducts(); store.set("payReceipts", payReceipts); store.set("closings", closings); store.set("shop", shop);
+          } finally { applyingRemote = false; }
+          sync.seq = Math.max(sync.seq || 0, ...rows.map(r => r.seq));
+          got += rows.length;
+        }
+      } while (rows.length === 500);
+      // 2. Push what changed here (a receipt merged above is pushed back so both phones agree).
+      const recs = localRecords(), out = [];
+      for (const [k, v] of Object.entries(recs)) {
+        const h = quickHash(JSON.stringify(v));
+        if (pushed[k] !== h) out.push({ k, v, h });
+      }
+      for (let i = 0; i < out.length; i += 100) {
+        const part = out.slice(i, i + 100);
+        const rowsOut = [];
+        for (const x of part) rowsOut.push({ k: x.k, d: await seal(x.v) });
+        await rpc("sync_put", { p_shop: sync.shop, p_token: sync.token, p_rows: rowsOut });
+        part.forEach(x => pushed[x.k] = x.h);
+      }
+      sync.last = Date.now(); syncErr = "";
+      store.set("sync", sync); store.set("syncPushed", pushed);
+      if (got) { updateBadge(); if (["history", "owing", "products"].includes(currentView)) show(currentView, true); }
+    } catch (e) {
+      syncErr = navigator.onLine ? (e.name === "AbortError" ? "The connection is slow." : e.message) : "No internet.";
+      store.set("sync", sync); store.set("syncPushed", pushed);
+    } finally {
+      syncing = false;
+      renderSyncLine();
+      if (syncAgain) { syncAgain = false; setTimeout(syncNow, 300); }
+    }
+  }
+  const ago = (t) => { if (!t) return "not yet"; const s = (Date.now() - t) / 1000;
+    return s < 60 ? "just now" : s < 3600 ? Math.round(s / 60) + " min ago" : new Date(t).toLocaleString("en-GH", { dateStyle: "medium", timeStyle: "short" }); };
+  function renderSyncLine() {
+    const el = $("syncLine"); if (!el) return;
+    el.innerHTML = !sync ? "" : syncErr ? `<span class="down">● Not updated: ${esc(syncErr)}</span> Showing what this phone has.`
+      : `<span class="up">●</span> Live. Updated ${ago(sync.last)}.`;
+    if (currentView === "settings") renderAccess();
+  }
+  const joinLink = () => new URL(location.pathname, location.href).href + "#join=" + sync.shop + "." + sync.key;
+
+  // ---------- owner PIN ----------
+  // Locks the Sales and Shop tabs on the counter phone. It keeps an attendant out of the owner's
+  // screens; it is not strong security (the phone holds the data), which is why receipt numbers
+  // and day reports also expose deleted sales.
+  let unlockedUntil = 0;
+  async function pinHash(pin, salt) {
+    return b64url(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("kontaa-pin|" + salt + "|" + pin))));
+  }
+  const pinSet = () => !!store.get("pin", null);
+  function needsPin(view) {
+    return sync && sync.role === "counter" && pinSet() && (view === "history" || view === "settings") && Date.now() > unlockedUntil;
+  }
+  function modal(html) { $("modalBody").innerHTML = html; $("modal").classList.remove("hidden"); }
+  function closeModal() { $("modal").classList.add("hidden"); $("modalBody").innerHTML = ""; }
+  function askPin(then) {
+    modal(`<h2>Owner PIN</h2><p class="note mb">This screen is for the shop owner.</p>
+      <input id="pinIn" type="password" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="PIN">
+      <p class="note" id="pinErr" style="color:var(--danger)"></p>
+      <div class="send2" style="margin-top:10px"><button id="pinCancel">Cancel</button><button class="primary" id="pinOk">Open</button></div>`);
+    $("pinIn").focus();
+    const ok = async () => {
+      const p = store.get("pin", null);
+      if (p && await pinHash($("pinIn").value.trim(), p.salt) === p.hash) { unlockedUntil = Date.now() + 10 * 60e3; closeModal(); then(); }
+      else { $("pinErr").textContent = "Wrong PIN."; $("pinIn").value = ""; $("pinIn").focus(); }
+    };
+    $("pinOk").onclick = ok; $("pinIn").onkeydown = (e) => { if (e.key === "Enter") ok(); };
+    $("pinCancel").onclick = closeModal;
+  }
+  function applyRole() {
+    const owner = sync && sync.role === "owner";
+    document.querySelector('.tabs button[data-view="new"]').classList.toggle("hidden", owner);
+  }
+
+  // ---------- owner access card (Shop tab) ----------
+  function renderAccess() {
+    const box = $("accessBody");
+    if (!sync) {
+      box.innerHTML = `<p class="mb">See this shop's sales from any phone, any time: from home, on a trip, or while an attendant sells.</p>
+        <p class="note mb">Your sales are locked on this phone before they go online, so nobody else can read them. Not even Kontaa.</p>
+        <button class="primary full" id="accOn">Turn on owner access</button><p class="note" id="accErr"></p>`;
+      $("accOn").onclick = turnOn;
+      return;
+    }
+    const p = store.get("pin", null);
+    box.innerHTML = `
+      <p class="mb"><span class="${syncErr ? "down" : "up"}">●</span> ${syncErr ? "Not updated: " + esc(syncErr) : "Online. Updated " + ago(sync.last) + "."}
+        This phone is the <b>${sync.role === "owner" ? "owner's phone" : "shop counter"}</b>.</p>
+      <div class="dash-h">Link the owner's phone</div>
+      <p class="note mb">Open this link on the owner's phone and choose "Owner's phone". Anyone with the link can see your sales, so send it only to yourself and keep it: it is also how you get your data back if a phone is lost.</p>
+      <div class="send2 mb"><button class="primary" id="accSend">Send link on WhatsApp</button><button id="accCopy">Copy link</button></div>
+      <div class="dash-h">Owner PIN</div>
+      <p class="note mb">${p ? "Set. The counter phone asks for it before opening Sales and Shop." : "Not set. Set one so an attendant can't open Sales or change shop details on the counter phone."}</p>
+      <div class="send2 mb"><input id="accPin" type="password" inputmode="numeric" maxlength="8" placeholder="${p ? "New PIN" : "4 to 8 digits"}" autocomplete="off"><button id="accPinSave">${p ? "Change PIN" : "Set PIN"}</button></div>
+      <div class="dash-h">This phone is</div>
+      <div class="send2 mb"><button id="accCounter" class="${sync.role === "counter" ? "primary" : ""}">Shop counter</button><button id="accOwner" class="${sync.role === "owner" ? "primary" : ""}">Owner's phone</button></div>
+      <p class="note mb">The counter makes sales. The owner's phone shows sales, owing and reports, and can record payments. Only one phone should make sales.</p>
+      <div class="send2"><button id="accSync">Update now</button><button id="accOff">Turn off on this phone</button></div>
+      <p class="note" id="accErr"></p>`;
+    $("accSend").onclick = () => {
+      const o = ghPhone(shop.owner || "");
+      const text = `Kontaa owner link for ${shop.name || "my shop"}. Open on the owner's phone only: ${joinLink()}`;
+      openExternal(isPhone ? whatsappUrl(o, text) : `https://web.whatsapp.com/send${waQuery(o, text)}`, !isPhone);
+    };
+    $("accCopy").onclick = async () => {
+      try { await navigator.clipboard.writeText(joinLink()); $("accErr").textContent = "Copied. Paste it only into a chat with yourself."; }
+      catch { $("accErr").textContent = joinLink(); }
+    };
+    $("accPinSave").onclick = async () => {
+      const pin = $("accPin").value.trim();
+      if (!/^\d{4,8}$/.test(pin)) return $("accErr").textContent = "Use 4 to 8 digits.";
+      const salt = b64url(crypto.getRandomValues(new Uint8Array(9)));
+      store.set("pin", { salt, hash: await pinHash(pin, salt) });
+      unlockedUntil = Date.now() + 10 * 60e3;
+      renderAccess(); $("accErr").textContent = "PIN saved. Don't forget it: Kontaa can't recover it.";
+    };
+    const setRole = (role) => { sync.role = role; store.set("sync", sync); applyRole(); renderAccess(); };
+    $("accCounter").onclick = () => setRole("counter");
+    $("accOwner").onclick = () => setRole("owner");
+    $("accSync").onclick = () => { $("accErr").textContent = "Updating…"; syncNow(); };
+    $("accOff").onclick = () => {
+      if (!confirm("Stop syncing on this phone? Sales stay on this phone. You can link it again with the owner link.")) return;
+      sync = null; cryptoKey = null; pushed = {}; store.set("sync", null); store.set("syncPushed", {}); applyRole(); renderAccess(); renderSyncLine();
+    };
+  }
+  async function turnOn() {
+    if (!crypto.subtle) return $("accErr").textContent = "Open Kontaa from its https address to use this.";
+    $("accErr").textContent = "Setting up…";
+    try {
+      const key = b64url(crypto.getRandomValues(new Uint8Array(16)));
+      const shopId = b64url(crypto.getRandomValues(new Uint8Array(9)));
+      const token = await tokenFor(key);
+      await rpc("create_shop", { p_shop: shopId, p_token: token });
+      sync = { shop: shopId, key, token, role: "counter", seq: 0, at: { products: Date.now(), shop: Date.now(), pin: Date.now() }, last: 0, creator: true };
+      cryptoKey = null; pushed = {};
+      store.set("sync", sync);
+      await syncNow();
+      renderAccess();
+      if (syncErr) $("accErr").textContent = "Turned on, but the first upload failed: " + syncErr + " It will retry.";
+    } catch (e) {
+      sync = null; store.set("sync", null);
+      $("accErr").textContent = "Couldn't turn on: " + (e.name === "AbortError" ? "the connection is slow." : e.message) + " Check your internet and try again.";
+    }
+  }
+  // Opening an owner link: "#join=<shop>.<key>".
+  async function handleJoin() {
+    const m = location.hash.match(/^#join=([\w-]+)\.([\w-]+)$/);
+    if (!m) return false;
+    window.history.replaceState(null, "", location.pathname);   // keep the key out of the address bar
+    if (sync && sync.shop === m[1]) return false;
+    const n = history.length;   // receipts on this phone (window.history is the browser's)
+    modal(`<h2>Link this phone to the shop</h2>
+      <p class="mb">This phone will show the shop's sales and stay up to date.</p>
+      ${n ? `<p class="warn mb">This phone already has ${n} receipt${n === 1 ? "" : "s"}. They will be added to the shop.</p>` : ""}
+      ${sync ? `<p class="warn mb">This phone is linked to another shop. Linking here replaces that link.</p>` : ""}
+      <div class="btns" style="display:grid;gap:8px">
+        <button class="primary" id="jOwner">Owner's phone</button>
+        <button id="jCounter">Shop counter (makes sales)</button>
+        <button id="jCancel">Cancel</button>
+      </div><p class="note" id="jErr"></p>`);
+    const join = async (role) => {
+      $("jErr").textContent = "Linking…";
+      const token = await tokenFor(m[2]);
+      sync = { shop: m[1], key: m[2], token, role, seq: 0, at: {}, last: 0, creator: false };
+      cryptoKey = null; pushed = {};
+      try { await rpc("sync_get", { p_shop: sync.shop, p_token: token, p_since: 1e15 }); }
+      catch (e) { sync = null; return $("jErr").textContent = e.name === "AbortError" ? "The connection is slow. Try again." : e.message; }
+      store.set("sync", sync);
+      closeModal(); applyRole();
+      await syncNow();
+      show(role === "owner" ? "history" : "new");
+    };
+    $("jOwner").onclick = () => join("owner");
+    $("jCounter").onclick = () => join("counter");
+    $("jCancel").onclick = closeModal;
+    return true;
+  }
+  function startSync() {
+    applyRole();
+    if (sync) syncNow();
+    setInterval(() => { if (sync && document.visibilityState === "visible") syncNow(); }, 30000);
+    document.addEventListener("visibilitychange", () => { if (sync && document.visibilityState === "visible") syncNow(); });
+    window.addEventListener("online", () => { syncErr = ""; if (sync) syncNow(); });
+  }
+
   // ---------- start ----------
   saveHistory();
   updateBadge();
   recalc();
-  if (!shop.name) show("settings"); else show("new");
+  startSync();
+  handleJoin().then(joining => { if (!joining) { if (!shop.name && !sync) show("settings"); else show("new"); } });
 })();
 </script>
 </body>
