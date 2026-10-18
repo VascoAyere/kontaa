@@ -976,7 +976,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   const receiptPdf = (r) => makePdf(`${bizName()} Receipt ${r.no}`, receiptText(r), `${fileBiz()}-Receipt-${r.no}.pdf`);
 
   // ---------- generic send screen ----------
-  // msg = { title, text, sms, subject, phone, email, onSent(channel) }
+  // msg = { title, text, sms, subject, phone, email, pdf, onSent(channel) }
   let msg = null;
   function openMessage(m) {
     msg = m;
@@ -985,15 +985,48 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     $("toPhone").value = m.phone || "";
     $("toEmail").value = m.email || "";
     $("sendNote").textContent = "";
+    // Start uploading the secure link straight away, so it's ready by the time a button is tapped.
+    m.link = null;
+    m.linkP = m.pdf ? makeLink(m).then(l => (m.link = l), e => { console.warn("receipt link failed", e); return null; }) : Promise.resolve(null);
     $("pdfStatus").innerHTML = m.pdf
       ? `<div class="ok">✓ Locked PDF ready: ${esc(m.pdf.name)}. Choose how to send it.</div>` +
-        (canSendFiles() ? "" : inAppBrowser
-          ? `<div class="warn mb">You're in an app's built-in browser, which can't attach the PDF. ${isAndroid ? `<a href="intent://${location.host}${location.pathname}#Intent;scheme=https;package=com.android.chrome;end">Open Kontaa in Chrome</a>` : "Tap ⋯ and choose Open in Safari"} for one-tap sending. Until then: the PDF is saved, WhatsApp opens, and you attach it with 📎.</div>`
-          : `<div class="warn mb">This browser can't attach the PDF for you, so sending takes one extra step: the PDF is saved, the chat opens, and you attach it with 📎. Chrome on Android or Safari on iPhone attach it in one tap.</div>`)
+        (inAppBrowser ? `<div class="warn mb">You're in an app's built-in browser. ${isAndroid ? `<a href="intent://${location.host}${location.pathname}#Intent;scheme=https;package=com.android.chrome;end">Open Kontaa in Chrome</a>` : "Tap ⋯ and choose Open in Safari"} so WhatsApp opens properly.</div>` : "")
       : "";
     $("openPdf").classList.toggle("hidden", !m.pdf);
     show("receipt");
   }
+
+  // ---------- secure receipt links ----------
+  // The PDF is locked (AES-GCM) on this phone with a fresh random key, and only the scrambled copy is
+  // uploaded. The key travels in the link after "#", which browsers never send to any server, so the
+  // customer's browser can open it but the database (and whoever runs it) cannot.
+  const SB_URL = "https://mufmandbxtcoxmrlhagz.supabase.co";
+  const SB_KEY = "sb_publishable_NhuEFxMx6-eVF5ZW9Brntw_OSF0YWFZ";  // publishable: safe in a web page
+  function toB64(bytes) {
+    let s = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(s);
+  }
+  const b64url = (bytes) => toB64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  async function makeLink(m) {
+    if (!crypto.subtle) throw new Error("no crypto.subtle");
+    const pdf = new Uint8Array(await m.pdf.blob.arrayBuffer());
+    const payload = new TextEncoder().encode(JSON.stringify({ v: 1, name: m.pdf.name, title: m.title, text: m.text, pdf: toB64(pdf) }));
+    const raw = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt"]);
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, payload));
+    const all = new Uint8Array(iv.length + ct.length); all.set(iv); all.set(ct, iv.length);
+    const id = b64url(crypto.getRandomValues(new Uint8Array(9)));
+    const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 20000);
+    try {
+      const res = await fetch(SB_URL + "/rest/v1/rpc/put_receipt", { method: "POST", signal: ctl.signal,
+        headers: { apikey: SB_KEY, "Content-Type": "application/json" }, body: JSON.stringify({ p_id: id, p_data: toB64(all) }) });
+      if (!res.ok) throw new Error("upload " + res.status + " " + (await res.text()).slice(0, 200));
+    } finally { clearTimeout(t); }
+    return new URL("r.html", location.href).href.split("#")[0] + "#" + id + "." + b64url(raw);
+  }
+  // The message that carries the link. One line, so it reads well in WhatsApp, SMS and email.
+  const linkText = (link) => `${msg.subject}. Tap to open the PDF: ${link}`;
 
   const UA = navigator.userAgent;
   const isAndroid = /Android/i.test(UA);
@@ -1013,10 +1046,6 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     if (isAndroid) return `intent://send${waQuery(phone, text)}#Intent;scheme=whatsapp;S.browser_fallback_url=${encodeURIComponent(waMe(phone, text))};end`;
     if (isIOS) return `whatsapp://send${waQuery(phone, text)}`;
     return waMe(phone, text);
-  }
-  function canSendFiles() {
-    try { return !!(navigator.canShare && navigator.canShare({ files: [new File(["x"], "t.pdf", { type: "application/pdf" })] })); }
-    catch { return false; }
   }
   // Shares the PDF itself through the phone's share menu (WhatsApp, Gmail, etc.).
   // Returns false when this browser can't share files.
@@ -1042,90 +1071,120 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     if (!p) { $("sendNote").textContent = "That phone number doesn't look like a Ghana mobile number."; return null; }
     return { p };
   }
+  const retry = (url, what) => ` <a href="${esc(url)}">Tap here if ${what} didn't open</a>.`;
 
-  // Every option sends the PDF, never the receipt as plain text. Phones attach a file through
-  // their share menu. Where the browser can't do that, the PDF is saved to the phone and the
-  // app opens on the customer's chat (with no text) so the owner attaches the PDF with 📎.
-  async function sendPdfVia(ch, appName, openChat) {
-    if (!msg.pdf) { openChat(true); return sent(ch); }
-    if (await sharePdf()) {
+  // Phones. Every option delivers the PDF without the owner hunting for a file:
+  //  share   - the phone's share menu with the PDF attached (WhatsApp, email)
+  //  link    - the app opens with a secure link to the PDF already typed (SMS first; also the fallback)
+  //  save    - last resort when offline and the browser can't share: save the PDF, attach by hand
+  async function sendPdfVia(ch, appName, urlFor, plain, shareFirst) {
+    if (!msg.pdf) { openExternal(urlFor(plain)); $("sendNote").innerHTML = retry(urlFor(plain), appName); return sent(ch); }
+    if (shareFirst && await sharePdf()) {
+      $("sendNote").textContent = `In the menu, tap ${appName}, then the customer. The PDF is attached.`;
+      return sent(ch);
+    }
+    if (!msg.link) $("sendNote").textContent = "Preparing the receipt link…";
+    const link = await msg.linkP;
+    if (link) {
+      const url = urlFor(linkText(link));
+      openExternal(url);
+      $("sendNote").innerHTML = `${esc(appName)} opens with a secure link to the PDF in the message. Just press Send.` + retry(url, appName);
+      return sent(ch);
+    }
+    if (!shareFirst && await sharePdf()) {
       $("sendNote").textContent = `In the menu, tap ${appName}, then the customer. The PDF is attached.`;
       return sent(ch);
     }
     savePdf(msg.pdf);
-    $("sendNote").textContent = `Saved ${msg.pdf.name} to your phone. In ${appName}, tap 📎 (attach) > Document, pick ${msg.pdf.name}, and send.`;
-    openChat(false);
+    const url = urlFor("");
+    openExternal(url);
+    $("sendNote").innerHTML = `No internet for a link, so ${esc(msg.pdf.name)} was saved to your phone. In ${esc(appName)}, tap 📎 (attach) > Document, pick it, and send.` + retry(url, appName);
     sent(ch);
   }
-  $("sendWa").onclick = () => {
-    const r = phoneOrWarn(); if (!r) return;
-    if (isPhone) {
-      return sendPdfVia("whatsapp", "WhatsApp", (withText) => {
-        openExternal(whatsappUrl(r.p, withText ? msg.text : ""));
-        $("sendNote").innerHTML += ` WhatsApp didn't open? <a href="${esc(waMe(r.p, withText ? msg.text : ""))}" target="_blank" rel="noopener">Open WhatsApp</a>.`;
-      });
-    }
-    const text = msg.pdf ? "" : msg.text, q = waQuery(r.p, text);
-    sendOnComputer("whatsapp", "WhatsApp", [
-      { key: "web", label: "WhatsApp Web", url: `https://web.whatsapp.com/send${q}`, web: true },
-      { key: "app", label: "WhatsApp desktop app", url: `whatsapp://send${q}` }
-    ]);
-  };
 
-  // On a computer the share window can't reach WhatsApp Web or Gmail, so every option saves the
-  // PDF and opens the chosen site in ONE reused browser tab (named per app), so a second send goes
-  // to the tab Kontaa already opened. The owner's last choice becomes the default.
-  function sendOnComputer(ch, appName, opts) {
-    const pref = store.get("pref-" + ch, opts[0].key);
-    const main = opts.find(o => o.key === pref) || opts[0];
-    if (msg.pdf) savePdf(msg.pdf);
-    const go = (o) => {
+  // Computers. WhatsApp Web and Gmail don't let websites attach files, so the message carries the
+  // secure link instead, and the chosen site opens in ONE reused tab (named per app). The owner's
+  // last choice becomes the default. Only when the link can't be made (offline) is the PDF saved.
+  function sendOnComputer(ch, build) {
+    const pref = store.get("pref-" + ch, null);
+    const pick = (opts) => opts.find(o => o.key === pref) || opts[0];
+    const go = (o, held) => {
       store.set("pref-" + ch, o.key);
-      if (o.web) { const w = window.open(o.url, "kontaa-" + ch); if (w) { try { w.focus(); } catch {} return true; } return false; }
+      if (o.web) {
+        if (held) { try { held.location.href = o.url; held.focus(); return true; } catch {} }
+        const w = window.open(o.url, "kontaa-" + ch); if (w) { try { w.focus(); } catch {} return true; } return false;
+      }
+      if (held) try { held.close(); } catch {}
       openExternal(o.url); return true;
     };
-    const render = (cur, opened) => {
-      $("sendNote").innerHTML =
-        (msg.pdf ? `Saved <b>${esc(msg.pdf.name)}</b> to Downloads. ` : "") +
-        (opened ? `Opened ${esc(cur.label)}.` : `Your browser blocked the new tab.`) +
-        (msg.pdf ? ` Attach the PDF there (📎 or the paperclip), then send.` : "") +
-        `<span style="display:flex;gap:8px;margin:8px 0;flex-wrap:wrap">` +
-        (opened ? "" : `<button class="primary small" type="button" data-o="${cur.key}">Open ${esc(cur.label)}</button>`) +
-        opts.filter(o => o !== cur).map(o => `<button class="small" type="button" data-o="${o.key}">Use ${esc(o.label)} instead</button>`).join("") + `</span>`;
-      $("sendNote").querySelectorAll("button[data-o]").forEach(btn => btn.onclick = () => {
-        const o = opts.find(x => x.key === btn.dataset.o); render(o, go(o));
-      });
+    const finish = (link, held) => {
+      const opts = build(link ? linkText(link) : null), main = pick(opts);
+      if (!link && msg.pdf) savePdf(msg.pdf);
+      const render = (cur, opened) => {
+        $("sendNote").innerHTML =
+          (!opened ? `Your browser blocked the new tab. ` : `Opened ${esc(cur.label)}. `) +
+          (link ? `The message has a secure link to the PDF. Just press Send.`
+            : msg.pdf ? `No internet for a link, so <b>${esc(msg.pdf.name)}</b> was saved to Downloads. Attach it there (📎), then send.` : "") +
+          `<span style="display:flex;gap:8px;margin:8px 0;flex-wrap:wrap">` +
+          (opened ? "" : `<button class="primary small" type="button" data-o="${cur.key}">Open ${esc(cur.label)}</button>`) +
+          opts.filter(o => o !== cur).map(o => `<button class="small" type="button" data-o="${o.key}">Use ${esc(o.label)} instead</button>`).join("") + `</span>`;
+        $("sendNote").querySelectorAll("button[data-o]").forEach(btn => btn.onclick = () => {
+          const o = opts.find(x => x.key === btn.dataset.o); render(o, go(o));
+        });
+      };
+      render(main, go(main, held));
+      sent(ch);
     };
-    render(main, go(main));
-    sent(ch);
+    if (!msg.pdf || msg.link) return finish(msg.link);
+    // Link still uploading. Browsers only allow a new tab straight after a tap, so hold one open now.
+    const first = pick(build(null));
+    const held = first.web ? window.open("", "kontaa-" + ch) : null;
+    try { if (held && held.location.href === "about:blank") held.document.body.innerHTML = "<p style='font:16px sans-serif;padding:24px'>Preparing the receipt link…</p>"; } catch {}
+    $("sendNote").textContent = "Preparing the receipt link…";
+    msg.linkP.then(link => finish(link, held));
   }
-  // A PDF through Messages goes as MMS/RCS; plain SMS can't carry files.
+
+  $("sendWa").onclick = () => {
+    const r = phoneOrWarn(); if (!r) return;
+    if (isPhone) return sendPdfVia("whatsapp", "WhatsApp", (t) => whatsappUrl(r.p, t), msg.text, true);
+    sendOnComputer("whatsapp", (t) => {
+      const q = waQuery(r.p, t ?? (msg.pdf ? "" : msg.text));
+      return [
+        { key: "web", label: "WhatsApp Web", url: `https://web.whatsapp.com/send${q}`, web: true },
+        { key: "app", label: "WhatsApp desktop app", url: `whatsapp://send${q}` }
+      ];
+    });
+  };
+  // SMS can't carry a file, so it always sends the link (a PDF by MMS costs more and often fails).
   $("sendSms").onclick = () => {
     const r = phoneOrWarn(); if (!r) return;
-    if (!isPhone) {
-      // Computers can't send SMS themselves; Windows hands sms: links to Phone Link if it's set up.
-      openExternal(`sms:${r.p ? "+" + r.p : ""}?body=${encodeURIComponent(msg.sms)}`);
+    const sep = isIOS ? "&" : "?";  // iOS wants "&body="
+    const smsUrl = (t) => `sms:${r.p ? "+" + r.p : ""}` + (t ? `${sep}body=${encodeURIComponent(t)}` : "");
+    if (isPhone) return sendPdfVia("sms", "Messages", smsUrl, msg.sms, false);
+    // Computers can't send SMS themselves; Windows hands sms: links to Phone Link if it's set up.
+    const fire = (t) => {
+      openExternal(smsUrl(t));
       $("sendNote").innerHTML = `SMS has to go out from a phone. If Phone Link (Windows) or Messages (Mac) opened, press send there. ` +
-        `If nothing opened, use <b>Copy text</b> below and send it from your phone, or send the PDF by WhatsApp or email instead.`;
-      return sent("sms");
-    }
-    const sep = /iPhone|iPad|iPod/.test(navigator.userAgent) ? "&" : "?";  // iOS wants "&body="
-    sendPdfVia("sms", "Messages", (withText) =>
-      openExternal(`sms:${r.p ? "+" + r.p : ""}` + (withText ? `${sep}body=${encodeURIComponent(msg.sms)}` : "")));
+        `If nothing opened, use <b>Copy text</b> below and send it from your phone, or use WhatsApp or email.`;
+      sent("sms");
+    };
+    if (!msg.pdf) return fire(msg.sms);
+    $("sendNote").textContent = "Preparing the receipt link…";
+    msg.linkP.then(link => fire(link ? linkText(link) : msg.sms));
   };
   $("sendEmail").onclick = () => {
-    const to = $("toEmail").value.trim();
-    if (!isPhone) {
-      const body = msg.pdf ? "Please find your receipt attached as a PDF." : msg.text, e = encodeURIComponent;
-      return sendOnComputer("email", "email", [
+    const to = $("toEmail").value.trim(), e = encodeURIComponent;
+    const plain = msg.pdf ? "Please find your receipt attached as a PDF." : msg.text;
+    const mailto = (t) => `mailto:${e(to)}?subject=${e(msg.subject)}&body=${e(t || plain)}`;
+    if (isPhone) return sendPdfVia("email", "your email app", mailto, msg.text, true);
+    sendOnComputer("email", (t) => {
+      const body = t || plain;
+      return [
         { key: "gmail", label: "Gmail", web: true, url: `https://mail.google.com/mail/?view=cm&fs=1&to=${e(to)}&su=${e(msg.subject)}&body=${e(body)}` },
         { key: "outlook", label: "Outlook.com", web: true, url: `https://outlook.live.com/mail/0/deeplink/compose?to=${e(to)}&subject=${e(msg.subject)}&body=${e(body)}` },
-        { key: "app", label: "my email app", url: `mailto:${e(to)}?subject=${e(msg.subject)}&body=${e(body)}` }
-      ]);
-    }
-    sendPdfVia("email", "your email app", (withText) =>
-      openExternal(`mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(msg.subject)}&body=` +
-        encodeURIComponent(withText ? msg.text : "Please find your receipt attached as a PDF.")));
+        { key: "app", label: "my email app", url: mailto(body) }
+      ];
+    });
   };
   $("copyBtn").onclick = async () => {
     try { await navigator.clipboard.writeText(msg.text); $("sendNote").textContent = "Copied."; }

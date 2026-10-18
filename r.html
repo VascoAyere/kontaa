@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Your receipt · Kontaa</title>
+<style>
+  :root {
+    --bg: #FBF7EE; --card: #ffffff; --ink: #2B1D14; --muted: #6B5A4A;
+    --line: #E6DECF; --accent: #0E6B5C; --accent-ink: #ffffff; --gold: #E8A317; --danger: #B3261E;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #15110D; --card: #201A14; --ink: #F3EDE2; --muted: #B3A594;
+      --line: #3A3128; --accent: #3FB59C; --accent-ink: #08201B; --gold: #F0B53A; --danger: #F2827A; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 520px; margin: 0 auto; padding: 16px; }
+  header { display: flex; align-items: center; gap: 10px; margin: 4px 0 14px; }
+  header b { font-size: 15px; color: var(--accent); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  pre { white-space: pre-wrap; word-break: break-word; font: 14px/1.45 ui-monospace, Menlo, Consolas, monospace;
+    background: var(--bg); border-radius: 10px; padding: 12px; margin: 0 0 14px; }
+  .btns { display: grid; gap: 10px; }
+  a.btn, button { display: block; text-align: center; font: inherit; font-weight: 600; padding: 13px; border-radius: 10px;
+    text-decoration: none; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+  a.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .note { color: var(--muted); font-size: 13px; margin: 14px 0 0; }
+  .err { color: var(--danger); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <svg width="28" height="28" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#0E6B5C"/><path d="M18 14h28v36l-4.7-3-4.6 3-4.7-3-4.7 3-4.6-3L18 50z" fill="#FBF7EE"/><path d="M25 32l5 5 10-11" stroke="#E8A317" stroke-width="4.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <b>kontaa</b>
+  </header>
+  <div class="card" id="box"><p>Opening your receipt…</p></div>
+  <p class="note">Sent with Kontaa. This receipt is locked: only someone with this exact link can open it, and it can't be changed.</p>
+</main>
+<script>
+(async () => {
+  const SB_URL = "https://mufmandbxtcoxmrlhagz.supabase.co";
+  const SB_KEY = "sb_publishable_NhuEFxMx6-eVF5ZW9Brntw_OSF0YWFZ";
+  const box = document.getElementById("box");
+  const fail = (m) => { box.innerHTML = `<h1>Can't open this receipt</h1><p class="err"></p>`; box.querySelector(".err").textContent = m; };
+  const fromB64 = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
+  try {
+    const [id, k] = location.hash.slice(1).split(".");
+    if (!id || !k) return fail("This link is incomplete. Ask the shop to send it again.");
+    if (!crypto.subtle) return fail("Open this link in Chrome or Safari.");
+    const res = await fetch(SB_URL + "/rest/v1/rpc/get_receipt", { method: "POST",
+      headers: { apikey: SB_KEY, "Content-Type": "application/json" }, body: JSON.stringify({ p_id: id }) });
+    if (!res.ok) return fail("We couldn't reach the receipt right now. Check your internet and try again.");
+    const data = await res.json();
+    if (!data) return fail("This receipt wasn't found. Ask the shop to send it again.");
+    const all = fromB64(data);
+    const key = await crypto.subtle.importKey("raw", fromB64(k), "AES-GCM", false, ["decrypt"]);
+    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: all.slice(0, 12) }, key, all.slice(12));
+    const r = JSON.parse(new TextDecoder().decode(plain));
+    const url = URL.createObjectURL(new Blob([fromB64(r.pdf)], { type: "application/pdf" }));
+    document.title = r.title;
+    box.innerHTML = `<h1></h1><pre></pre><div class="btns">
+      <a class="btn primary" id="dl">Download PDF</a><a class="btn" id="op" target="_blank" rel="noopener">Open PDF</a></div>`;
+    box.querySelector("h1").textContent = r.title;
+    box.querySelector("pre").textContent = r.text;
+    Object.assign(document.getElementById("dl"), { href: url, download: r.name });
+    document.getElementById("op").href = url;
+  } catch (e) {
+    fail("This link is damaged. Ask the shop to send it again.");
+  }
+})();
+</script>
+</body>
+</html>
