@@ -101,7 +101,7 @@
 </head>
 <body>
 <header class="no-print"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="34" height="34" aria-hidden="true"><rect width="120" height="120" rx="26" fill="#0E6B5C"/><path d="M34 22 H86 V92 L80 98 L73 92 L66 98 L60 92 L54 98 L47 92 L40 98 L34 92 Z" fill="#FBF7EE"/><rect x="43" y="34" width="34" height="5" rx="2.5" fill="#0E6B5C" opacity=".35"/><rect x="43" y="45" width="24" height="5" rx="2.5" fill="#0E6B5C" opacity=".35"/><path d="M45 67 L56 78 L77 56" fill="none" stroke="#E8A317" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/></svg>
-<div class="brand"><small>kontaa</small><h1 id="title">Every sale counted</h1></div></header>
+<div class="brand"><small>kontaa</small><h1 id="title">Every sale counted</h1></div><button id="ownerBtn" class="small hidden" style="margin-left:auto;flex:none" aria-label="Owner">🔒</button></header>
 
 <main>
   <!-- NEW SALE -->
@@ -1784,16 +1784,33 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     $("pinIn").focus();
     const ok = async () => {
       const p = store.get("pin", null);
-      if (p && await pinHash($("pinIn").value.trim(), p.salt) === p.hash) { unlockedUntil = Date.now() + 10 * 60e3; closeModal(); then(); }
+      if (p && await pinHash($("pinIn").value.trim(), p.salt) === p.hash) { unlockedUntil = Date.now() + 10 * 60e3; closeModal(); applyRole(); then(); }
       else { $("pinErr").textContent = "Wrong PIN."; $("pinIn").value = ""; $("pinIn").focus(); }
     };
     $("pinOk").onclick = ok; $("pinIn").onkeydown = (e) => { if (e.key === "Enter") ok(); };
     $("pinCancel").onclick = closeModal;
   }
+  // On the counter phone, once a PIN is set, the owner's screens (Sales, Shop) aren't even shown:
+  // the owner taps "Owner" in the header and enters the PIN. They lock again after 10 minutes,
+  // when the owner taps Lock, or when the app goes to the background.
+  const counterLocked = () => !!(sync && sync.role === "counter" && pinSet() && Date.now() > unlockedUntil);
   function applyRole() {
-    const owner = sync && sync.role === "owner";
-    document.querySelector('.tabs button[data-view="new"]').classList.toggle("hidden", owner);
+    const owner = sync && sync.role === "owner", locked = counterLocked();
+    const tab = (v) => document.querySelector(`.tabs button[data-view="${v}"]`);
+    tab("new").classList.toggle("hidden", !!owner);
+    tab("history").classList.toggle("hidden", locked);
+    tab("settings").classList.toggle("hidden", locked);
+    const btn = $("ownerBtn");
+    btn.classList.toggle("hidden", !(sync && sync.role === "counter" && pinSet()));
+    btn.textContent = locked ? "🔒" : "Lock";
   }
+  function lockOwner() {
+    unlockedUntil = 0; applyRole();
+    if (currentView === "history" || currentView === "settings") show("new");
+  }
+  $("ownerBtn").onclick = () => counterLocked() ? askPin(() => show("history")) : lockOwner();
+  setInterval(() => { if (unlockedUntil && Date.now() > unlockedUntil) lockOwner(); }, 15000);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden" && unlockedUntil) lockOwner(); });
 
   // ---------- owner access card (Shop tab) ----------
   function renderAccess() {
@@ -1835,7 +1852,8 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       const salt = b64url(crypto.getRandomValues(new Uint8Array(9)));
       store.set("pin", { salt, hash: await pinHash(pin, salt) });
       unlockedUntil = Date.now() + 10 * 60e3;
-      renderAccess(); $("accErr").textContent = "PIN saved. Don't forget it: Kontaa can't recover it.";
+      applyRole(); renderAccess();
+      $("accErr").textContent = "PIN saved. Sales and Shop are now hidden on this phone. To open them, tap the 🔒 at the top and enter the PIN. Don't forget it: Kontaa can't recover it.";
     };
     const setRole = (role) => { sync.role = role; store.set("sync", sync); applyRole(); renderAccess(); };
     $("accCounter").onclick = () => setRole("counter");
