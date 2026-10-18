@@ -76,6 +76,20 @@
   .stat { background: var(--bg); border-radius: 8px; padding: 8px; }
   .stat b { display: block; font-size: 16px; font-variant-numeric: tabular-nums; }
   .stat span { font-size: 12px; color: var(--muted); }
+  .stat.big { grid-column: span 3; background: var(--accent); color: var(--accent-ink); }
+  .stat.big b { font-size: 24px; } .stat.big span { color: inherit; opacity: .85; }
+  .stat em { display: block; font-style: normal; font-size: 12px; margin-top: 2px; }
+  .up { color: var(--accent); } .down { color: var(--danger); }
+  .stat.big .up, .stat.big .down { color: inherit; }
+  .chip.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .dash-h { font-size: 14px; font-weight: 600; margin: 14px 0 6px; }
+  .bars { display: flex; align-items: flex-end; gap: 3px; height: 110px; border-bottom: 1px solid var(--line); }
+  .bars div { flex: 1; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 1px; }
+  .bars div.zero { background: var(--line); }
+  .bar-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 3px; }
+  .rank { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; font-size: 14px; font-variant-numeric: tabular-nums; }
+  .rank .track { grid-column: span 2; height: 6px; background: var(--line); border-radius: 3px; margin-bottom: 6px; }
+  .rank .track i { display: block; height: 100%; background: var(--gold); border-radius: 3px; }
   .hidden { display: none !important; }
   .check { display: flex; gap: 8px; align-items: center; font-size: 14px; }
   .check input { width: auto; }
@@ -197,10 +211,20 @@
   <!-- HISTORY -->
   <section id="view-history" class="hidden">
     <div class="card">
-      <h2>Sales</h2>
+      <h2>Dashboard</h2>
+      <div class="chips mb" id="periods"></div>
+      <div class="send2 mb hidden" id="customRange">
+        <label>From<input type="date" id="dFrom"></label>
+        <label>To<input type="date" id="dTo"></label>
+      </div>
+      <p class="note mb" id="periodLabel"></p>
       <div class="stats" id="stats"></div>
+      <div id="dash"></div>
+    </div>
+    <div class="card">
+      <h2 id="histTitle">Sales</h2>
       <ul class="list" id="histList"></ul>
-      <button id="exportCsv" style="margin-top:12px">Download as CSV</button>
+      <button id="exportCsv" style="margin-top:12px">Download these sales as CSV</button>
     </div>
     <div class="card">
       <h2>Check a receipt</h2>
@@ -1243,21 +1267,99 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   };
 
   // ---------- sales history ----------
+  // ---------- dashboard ----------
+  // A period is [start, end) in local time. Sales count on their sale date; money in counts
+  // cash taken at the sale plus debt payments received inside the period.
+  const DAY = 864e5;
+  const dayStart = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
+  const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+  const isoDay = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const PERIODS = [["today", "Today"], ["yesterday", "Yesterday"], ["week", "This week"], ["month", "This month"], ["last30", "Last 30 days"], ["custom", "Pick dates"]];
+  let period = "today";
+  function periodRange(p) {
+    const t = dayStart(new Date());
+    if (p === "yesterday") return [addDays(t, -1), t];
+    if (p === "week") { const mon = addDays(t, -((t.getDay() + 6) % 7)); return [mon, addDays(t, 1)]; }  // weeks start Monday
+    if (p === "month") return [new Date(t.getFullYear(), t.getMonth(), 1), addDays(t, 1)];
+    if (p === "last30") return [addDays(t, -29), addDays(t, 1)];
+    if (p === "custom") {
+      let f = $("dFrom").value ? dayStart($("dFrom").value + "T00:00") : t, to = $("dTo").value ? dayStart($("dTo").value + "T00:00") : t;
+      if (to < f) [f, to] = [to, f];
+      return [f, addDays(to, 1)];
+    }
+    return [t, addDays(t, 1)];
+  }
+  function summarize(from, to) {
+    const inP = (d) => { const x = new Date(d); return x >= from && x < to; };
+    const sales = history.filter(r => inP(r.date));
+    const total = r2(sales.reduce((s, r) => s + r.total, 0));
+    const methods = new Map();
+    const addM = (m, v) => { if (v > 0) { const k = (m || "Cash").trim() || "Cash"; methods.set(k, r2((methods.get(k) || 0) + v)); } };
+    let atSale = 0, debtIn = 0;
+    sales.forEach(r => { const v = r.paidAtSale ?? r.paid; atSale += v; addM(r.payMethod, v); });
+    history.forEach(r => r.payments.forEach(p => { if (inP(p.date)) { debtIn += p.amount; addM(p.method, p.amount); } }));
+    const credit = r2(sales.reduce((s, r) => s + r.total - (r.paidAtSale ?? r.paid), 0));
+    const items = new Map();
+    sales.forEach(r => r.items.forEach(i => {
+      const k = i.name.trim().toLowerCase(), e = items.get(k) || { name: i.name.trim(), qty: 0, value: 0 };
+      e.qty += i.qty; e.value = r2(e.value + i.qty * i.price); items.set(k, e);
+    }));
+    return { sales, total, count: sales.length, moneyIn: r2(atSale + debtIn), debtIn: r2(debtIn), credit,
+      stillOwing: r2(sales.reduce((s, r) => s + balance(r), 0)), methods, items: [...items.values()].sort((a, b) => b.value - a.value) };
+  }
+  let vsLabel = "";
+  function change(now, before) {
+    if (!before) return "";
+    const pct = Math.round((now - before) / before * 100);
+    return `<em class="${pct >= 0 ? "up" : "down"}">${pct >= 0 ? "▲" : "▼"} ${Math.abs(pct)}% vs ${vsLabel}</em>`;
+  }
+  const fmtLong = (d) => d.toLocaleDateString("en-GH", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+  let shownSales = [];
   function renderHistory() {
-    const now = new Date(), today = now.toDateString();
-    const weekAgo = new Date(now - 6 * 864e5); weekAgo.setHours(0, 0, 0, 0);
-    const todays = history.filter(r => new Date(r.date).toDateString() === today);
-    const week = history.filter(r => new Date(r.date) >= weekAgo);
-    // Cash in today = money paid at sale today + debt payments received today.
-    const cashToday = history.reduce((s, r) => s
-      + (new Date(r.date).toDateString() === today ? (r.paidAtSale ?? r.paid) : 0)
-      + r.payments.filter(p => new Date(p.date).toDateString() === today).reduce((a, p) => a + p.amount, 0), 0);
+    $("periods").innerHTML = "";
+    PERIODS.forEach(([k, label]) => {
+      const b = document.createElement("button");
+      b.className = "chip" + (k === period ? " on" : ""); b.textContent = label;
+      b.onclick = () => { period = k; renderHistory(); };
+      $("periods").appendChild(b);
+    });
+    $("customRange").classList.toggle("hidden", period !== "custom");
+    if (period === "custom" && !$("dFrom").value) { $("dFrom").value = isoDay(addDays(new Date(), -6)); $("dTo").value = isoDay(new Date()); }
+    const [from, to] = periodRange(period), days = Math.round((to - from) / DAY);
+    vsLabel = days === 1 ? "day before" : `previous ${days} days`;
+    const S = summarize(from, to), P = summarize(addDays(from, -days), from);  // the same length just before
+    $("periodLabel").textContent = days === 1 ? fmtLong(from) : `${fmtLong(from)} to ${fmtLong(addDays(to, -1))} (${days} days)`;
     $("stats").innerHTML =
-      `<div class="stat"><b>${cedi(todays.reduce((s, r) => s + r.total, 0))}</b><span>Sales today (${todays.length})</span></div>` +
-      `<div class="stat"><b>${cedi(cashToday)}</b><span>Money in today</span></div>` +
-      `<div class="stat"><b>${cedi(week.reduce((s, r) => s + r.total, 0))}</b><span>Last 7 days</span></div>`;
+      `<div class="stat big"><b>${cedi(S.moneyIn)}</b><span>Money received${S.debtIn ? `, incl. ${cedi(S.debtIn)} of old debts paid` : ""}</span>${change(S.moneyIn, P.moneyIn)}</div>` +
+      `<div class="stat"><b>${cedi(S.total)}</b><span>Sales value</span>${change(S.total, P.total)}</div>` +
+      `<div class="stat"><b>${S.count}</b><span>Receipts</span>${S.count ? `<em>avg ${cedi(S.total / S.count)}</em>` : ""}</div>` +
+      `<div class="stat"><b class="${S.stillOwing ? "down" : ""}">${cedi(S.stillOwing)}</b><span>Still owing from these sales</span>${S.credit ? `<em>${cedi(S.credit)} sold on credit</em>` : ""}</div>`;
+    let h = "";
+    if (days > 1 && days <= 92) {
+      const per = Array.from({ length: days }, (_, i) => ({ d: addDays(from, i), v: 0 }));
+      S.sales.forEach(r => { const i = Math.floor((dayStart(r.date) - from) / DAY); if (per[i]) per[i].v += r.total; });
+      const max = Math.max(...per.map(x => x.v)), best = per.reduce((a, b) => b.v > a.v ? b : a);
+      h += `<div class="dash-h">Sales per day</div><div class="bars">` +
+        per.map(x => `<div class="${x.v ? "" : "zero"}" style="height:${max ? Math.max(1, x.v / max * 100) : 1}%" title="${fmtDate(x.d)}: ${cedi(x.v)}"></div>`).join("") +
+        `</div><div class="bar-axis"><span>${fmtDate(from)}</span><span>${fmtDate(addDays(to, -1))}</span></div>` +
+        (max ? `<p class="note">Best day: ${fmtLong(best.d)}, ${cedi(best.v)}. Daily average: ${cedi(S.total / days)}.</p>` : "");
+    }
+    if (S.items.length) {
+      const top = S.items.slice(0, 5), mx = top[0].value || 1;
+      h += `<div class="dash-h">Top items</div><div class="rank">` + top.map(i =>
+        `<span>${esc(i.name)} <span class="note">× ${r2(i.qty)}</span></span><span>${cedi(i.value)}</span><span class="track"><i style="width:${i.value / mx * 100}%"></i></span>`).join("") + `</div>`;
+    }
+    if (S.methods.size) {
+      h += `<div class="dash-h">How you were paid</div><div class="rank">` +
+        [...S.methods].sort((a, b) => b[1] - a[1]).map(([m, v]) => `<span>${esc(m)}</span><span>${cedi(v)}</span>`).join("") + `</div>`;
+    }
+    if (!S.count && !S.moneyIn) h += `<p class="note">No sales in this period.</p>`;
+    $("dash").innerHTML = h;
+    // The list below shows this period's receipts.
+    shownSales = S.sales;
+    $("histTitle").textContent = `Receipts in this period (${S.count})`;
     $("histList").innerHTML = "";
-    history.forEach(r => {
+    S.sales.forEach(r => {
       const li = document.createElement("li");
       const who = r.customer.name || r.customer.phone || "Walk-in";
       const owe = balance(r);
@@ -1267,16 +1369,17 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       li.querySelector("button").onclick = () => openReceipt(r);
       $("histList").appendChild(li);
     });
-    if (!history.length) $("histList").innerHTML = `<li class="note">No sales yet.</li>`;
+    if (!S.count) $("histList").innerHTML = `<li class="note">${history.length ? "No receipts in this period." : "No sales yet."}</li>`;
   }
+  ["dFrom", "dTo"].forEach(id => $(id).addEventListener("change", renderHistory));
   $("exportCsv").onclick = () => {
     const q = (s) => `"${String(s ?? "").replace(/"/g, '""')}"`;
     const rows = [["receipt", "date", "customer", "phone", "email", "items", "subtotal", "discount", "tax", "total", "paid", "owing", "paid_by", "reference"]];
-    history.forEach(r => rows.push([r.no, r.date, r.customer.name, r.customer.phone, r.customer.email,
+    shownSales.forEach(r => rows.push([r.no, r.date, r.customer.name, r.customer.phone, r.customer.email,
       r.items.map(i => `${i.qty}x ${i.name} @ ${i.price}`).join("; "),
       r.subtotal.toFixed(2), r.discount.toFixed(2), r.tax.toFixed(2), r.total.toFixed(2), r.paid.toFixed(2), balance(r).toFixed(2), r.payMethod, r.payRef]));
     const blob = new Blob([rows.map(r => r.map(q).join(",")).join("\n")], { type: "text/csv" });
-    const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: "sales.csv" });
+    const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: `${fileBiz()}-sales-${$("periodLabel").textContent.replace(/[^\w]+/g, "-").replace(/^-|-$/g, "")}.csv` });
     a.click(); URL.revokeObjectURL(a.href);
   };
 
