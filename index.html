@@ -1105,11 +1105,26 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   // Computers. WhatsApp Web and Gmail don't let websites attach files, so the message carries the
   // secure link instead, and the chosen site opens in ONE reused tab (named per app). The owner's
   // last choice becomes the default. Only when the link can't be made (offline) is the PDF saved.
-  function sendOnComputer(ch, build) {
+  // Windows/Mac share window: hands the PDF itself to an installed app (WhatsApp desktop, Outlook, Mail).
+  function canShareFile() {
+    try { return !!(msg.pdf && navigator.canShare && navigator.canShare({ files: [new File([msg.pdf.blob], msg.pdf.name, { type: "application/pdf" })] })); }
+    catch { return false; }
+  }
+  function sendOnComputer(ch, buildSites) {
     const pref = store.get("pref-" + ch, null);
+    const build = (t) => {
+      const opts = buildSites(t);
+      if (canShareFile()) opts.splice(1, 0, { key: "share", label: "the share window (attaches the PDF)", share: true });
+      return opts;
+    };
     const pick = (opts) => opts.find(o => o.key === pref) || opts[0];
     const go = (o, held) => {
       store.set("pref-" + ch, o.key);
+      if (o.share) {
+        if (held) try { held.close(); } catch {}
+        sharePdf().then(ok => { if (!ok) $("sendNote").insertAdjacentHTML("afterbegin", "This computer's share window couldn't take the PDF. "); });
+        return true;
+      }
       if (o.web) {
         if (held) { try { held.location.href = o.url; held.focus(); return true; } catch {} }
         const w = window.open(o.url, "kontaa-" + ch); if (w) { try { w.focus(); } catch {} return true; } return false;
@@ -1119,12 +1134,14 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     };
     const finish = (link, held) => {
       const opts = build(link ? linkText(link) : null), main = pick(opts);
-      if (!link && msg.pdf) savePdf(msg.pdf);
+      if (!link && msg.pdf && !main.share) savePdf(msg.pdf);
       const render = (cur, opened) => {
         $("sendNote").innerHTML =
-          (!opened ? `Your browser blocked the new tab. ` : `Opened ${esc(cur.label)}. `) +
+          (cur.share ? `The share window opened with the PDF attached. Pick WhatsApp or your email app, then the customer, and send. ` +
+              `No WhatsApp in the list? Install the free WhatsApp app from the Microsoft Store.`
+          : (!opened ? `Your browser blocked the new tab. ` : `Opened ${esc(cur.label)}. `) +
           (link ? `The message has a secure link to the PDF. Just press Send.`
-            : msg.pdf ? `No internet for a link, so <b>${esc(msg.pdf.name)}</b> was saved to Downloads. Attach it there (📎), then send.` : "") +
+            : msg.pdf ? `No internet for a link, so <b>${esc(msg.pdf.name)}</b> was saved to Downloads. Attach it there (📎), then send.` : "")) +
           `<span style="display:flex;gap:8px;margin:8px 0;flex-wrap:wrap">` +
           (opened ? "" : `<button class="primary small" type="button" data-o="${cur.key}">Open ${esc(cur.label)}</button>`) +
           opts.filter(o => o !== cur).map(o => `<button class="small" type="button" data-o="${o.key}">Use ${esc(o.label)} instead</button>`).join("") + `</span>`;
@@ -1135,7 +1152,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       render(main, go(main, held));
       sent(ch);
     };
-    if (!msg.pdf || msg.link) return finish(msg.link);
+    if (!msg.pdf || msg.link || (pref === "share" && canShareFile())) return finish(msg.link);
     // Link still uploading. Browsers only allow a new tab straight after a tap, so hold one open now.
     const first = pick(build(null));
     const held = first.web ? window.open("", "kontaa-" + ch) : null;
