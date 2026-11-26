@@ -56,6 +56,10 @@
   .seg.hidden { display: none; }
   .seg button { border: 0; border-radius: 0; padding: 6px 10px; font-size: 13px; background: var(--card); color: var(--muted); }
   .seg button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .seg.wide { margin: 0 0 12px; }
+  .seg.wide button { flex: 1; padding: 10px; font-size: 15px; }
+  .logo-prev { display: block; max-width: 160px; max-height: 72px; object-fit: contain; margin: 4px 0 8px; }
+  #msgLogo { margin: 0 auto 8px; }
   .full { width: 100%; }
   .modal { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 50; }
   .modal.hidden { display: none; }
@@ -119,7 +123,10 @@
 <main>
   <!-- NEW SALE -->
   <section id="view-new">
+    <div class="seg wide no-print" id="docType" role="group" aria-label="What are you making"><button id="dtReceipt" class="on">Receipt</button><button id="dtPf">Pro forma</button></div>
+    <p class="note mb hidden" id="pfIntro">A pro forma is a price quote for a customer. It is not a sale: it doesn't count in your sales, totals or owing until you turn it into a sale.</p>
     <div class="card no-print">
+      <p class="ok hidden" id="convNote"></p>
       <h2>Items</h2>
       <input id="prodSearch" class="mb" placeholder="Search your products" autocomplete="off">
       <div class="chips" id="chips"></div>
@@ -139,21 +146,28 @@
     </div>
 
     <div class="card no-print">
-      <h2>Payment</h2>
+      <h2 id="payH2">Payment</h2>
       <div class="row mb">
         <div><label for="discount">Discount (GH₵)</label><input id="discount" type="number" inputmode="decimal" min="0" step="0.01" value="0"></div>
         <div><label for="payMethod">Paid by</label><input id="payMethod" list="methods" value="Mobile Money"></div>
       </div>
       <datalist id="methods"><option>Cash</option><option>Mobile Money</option><option>Card</option><option>Bank transfer</option></datalist>
+      <div id="pfBox" class="hidden mb"><label for="pfDays">Prices valid for (days)</label><input id="pfDays" type="number" inputmode="numeric" min="1" max="365" value="14"></div>
+      <div id="payBox">
       <div class="row mb">
         <div><label for="paidNow">Amount paid (GH₵)</label><input id="paidNow" type="number" inputmode="decimal" min="0" step="0.01" placeholder="Full amount"></div>
         <div><label for="payRef">MoMo reference</label><input id="payRef" autocomplete="off"></div>
       </div>
       <div class="chips" style="margin:0 0 6px" id="notes"></div>
       <p class="note mb">Type what the customer handed over, or tap the notes. More than the total shows the change; less records the rest as balance due. Leave empty if they paid exactly.</p>
+      </div>
       <div class="totals" id="totals"></div>
       <p class="err" id="err"></p>
       <button class="primary full" id="makeReceipt">Create receipt</button>
+    </div>
+    <div class="card no-print hidden" id="pfListCard">
+      <h2>Pro formas</h2>
+      <ul class="list" id="pfList"></ul>
     </div>
   </section>
 
@@ -161,6 +175,7 @@
   <section id="view-receipt" class="hidden">
     <div class="card">
       <h2 class="no-print" id="msgTitle">Receipt</h2>
+      <img id="msgLogo" class="logo-prev hidden" alt="">
       <pre class="receipt" id="receiptText"></pre>
       <div class="no-print">
         <div class="row mb">
@@ -258,6 +273,8 @@
     <div class="card">
       <h2>Your shop</h2>
       <div class="mb"><label for="sName">Shop name</label><input id="sName"></div>
+      <div class="mb"><label>Logo on receipts (optional)</label><div id="logoBox"></div>
+        <input id="sLogo" type="file" accept="image/*" class="hidden"><p class="note" id="logoNote"></p></div>
       <div class="row mb">
         <div><label for="sPhone">Shop phone</label><input id="sPhone" type="tel"></div>
         <div><label for="sTin">TIN / Ghana Card (optional)</label><input id="sTin"></div>
@@ -731,6 +748,10 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   const saveProducts = () => store.set("products", products);
   const balance = (r) => r2(r.total - r.paid);
   const custKey = (c) => ghPhone(c.phone) || (c.name || "").trim().toLowerCase();
+  let logo = store.get("logo", null);             // { data: JPEG data URL, w, h }, kept small for syncing
+  let proformas = store.get("proformas", []);     // quotes; never counted as sales
+  const savePf = () => store.set("proformas", proformas);
+  let docMode = "receipt", convertingFrom = null; // Sell screen: "receipt" or "pf"; pro forma being turned into a sale
 
   // ---------- views ----------
   const titles = { new: "New sale", receipt: "Send", products: "Products", owing: "Owing", history: "Sales", settings: "Your shop" };
@@ -746,7 +767,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     if (view === "settings") loadShop();
     if (view === "products") renderProducts();
     if (view === "owing") renderOwing();
-    if (view === "new") renderChips();
+    if (view === "new") { renderChips(); if (docMode === "pf") renderPfList(); }
     fillCustomerList();
     if (!quiet) window.scrollTo(0, 0);
   }
@@ -879,7 +900,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     const items = readItems();
     items.forEach(i => i.el.querySelector(".line-total").textContent = i.qty && i.price ? `${i.qty} × ${cedi(i.price)} = ${cedi(i.qty * i.price)}` : "");
     const t = compute(items, parseFloat($("discount").value));
-    const pay = payment(t.total);
+    const pay = docMode === "pf" ? { given: null, change: 0, due: 0 } : payment(t.total);
     $("totals").innerHTML =
       `<div><span>Subtotal</span><span>${cedi(t.subtotal)}</span></div>` +
       (t.discount ? `<div><span>Discount</span><span>−${cedi(t.discount)}</span></div>` : "") +
@@ -968,19 +989,23 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     const lines = body.flatMap(l => l ? measure.splitTextToSize(l, W - 2 * M) : [""]);
     measure.setFont("helvetica", "bold"); measure.setFontSize(14);
     const nameLines = measure.splitTextToSize(name, W - 2 * M);
-    const top = M + nameLines.length * 6 + 1;
+    // Shop logo above the name, at most 40 x 18 mm; the name stays the biggest text.
+    const lg = logo && logo.data ? (() => { const k = Math.min(40 / logo.w, 18 / logo.h); return { w: logo.w * k, h: logo.h * k }; })() : null;
+    const off = lg ? lg.h + 3 : 0;
+    const top = M + off + nameLines.length * 6 + 1;
     const H = Math.max(60, top + lines.length * LH + 12);
     const doc = new jsPDF({
       unit: "mm", format: [W, H],
       encryption: { userPassword: "", ownerPassword: secret + Date.now(), userPermissions: ["print"] }
     });
     doc.setProperties({ title, author: shop.name || "Kontaa", creator: "Kontaa" });
+    if (lg) doc.addImage(logo.data, "JPEG", (W - lg.w) / 2, M, lg.w, lg.h);
     doc.setFont("helvetica", "bold"); doc.setFontSize(14);
-    nameLines.forEach((l, i) => doc.text(l, W / 2, M + 5 + i * 6, { align: "center" }));
+    nameLines.forEach((l, i) => doc.text(l, W / 2, M + off + 5 + i * 6, { align: "center" }));
     doc.setFont("courier", "normal"); doc.setFontSize(FS);
     lines.forEach((l, i) => {
       const total = /^TOTAL:/.test(l);
-      doc.setFont("courier", total ? "bold" : "normal");
+      doc.setFont("courier", total || /^PRO FORMA INVOICE/.test(l) ? "bold" : "normal");
       doc.setTextColor(total ? 14 : 43, total ? 107 : 29, total ? 92 : 20);  // Kontaa green for the total, cocoa otherwise
       doc.text(l, M, top + 3 + i * LH);
     });
@@ -1011,6 +1036,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     msg = m;
     $("msgTitle").textContent = m.title;
     $("receiptText").textContent = m.text;
+    $("msgLogo").src = logo ? logo.data : ""; $("msgLogo").classList.toggle("hidden", !logo);
     $("toPhone").value = m.phone || "";
     $("toEmail").value = m.email || "";
     $("sendNote").textContent = "";
@@ -1256,6 +1282,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     const phoneRaw = $("cPhone").value.trim(), name = $("cName").value.trim();
     if (phoneRaw && !ghPhone(phoneRaw)) return $("err").textContent = "That phone number doesn't look like a Ghana mobile number.";
     const t = compute(items, parseFloat($("discount").value));
+    if (docMode === "pf") return makeProforma(items, t, name, phoneRaw);
     const pay = payment(t.total), paid = pay.paid;
     if (pay.due > 0 && !name && !phoneRaw) return $("err").textContent = `${cedi(pay.due)} is still due. Add the customer's name or phone so you can follow up.`;
 
@@ -1274,6 +1301,11 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     try { pdf = receiptPdf(r); }
     catch (e) { console.error(e); return $("err").textContent = "Couldn't make the PDF, so the receipt was not created. (" + e.message + ")"; }
     history.unshift(r); saveHistory();
+    if (convertingFrom) {
+      const f = proformas.find(x => x.id === convertingFrom);
+      if (f) { f.receiptNo = r.no; f.at = Date.now(); savePf(); }
+      convertingFrom = null; $("convNote").classList.add("hidden");
+    }
     items.forEach(i => { upsertProduct(i.name, i.price); products.find(p => p.name.toLowerCase() === i.name.toLowerCase()).uses += 1; });
     saveProducts();
     updateBadge();
@@ -1286,6 +1318,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   };
 
   function resetForm() {
+    convertingFrom = null; $("convNote").classList.add("hidden");
     ["cName", "cPhone", "cEmail", "payRef", "paidNow", "prodSearch"].forEach(id => $(id).value = "");
     $("discount").value = 0;
     $("items").innerHTML = "";
@@ -1303,6 +1336,103 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     const names = [...new Set(history.map(h => h.customer.name).filter(Boolean))];
     $("custList").innerHTML = names.map(n => `<option value="${esc(n)}">`).join("");
     $("prodNames").innerHTML = products.map(p => `<option value="${esc(p.name)}">`).join("");
+  }
+
+  // ---------- pro forma invoices ----------
+  // A quote, not a sale: kept apart from receipts so it never counts in sales, totals or owing.
+  function setDocMode(m) {
+    docMode = m;
+    const pf = m === "pf";
+    $("dtReceipt").classList.toggle("on", !pf); $("dtPf").classList.toggle("on", pf);
+    ["pfBox", "pfIntro", "pfListCard"].forEach(id => $(id).classList.toggle("hidden", !pf));
+    $("payBox").classList.toggle("hidden", pf); $("payMethod").parentElement.classList.toggle("hidden", pf);
+    $("payH2").textContent = pf ? "Total" : "Payment";
+    $("makeReceipt").textContent = pf ? "Create pro forma" : "Create receipt";
+    $("err").textContent = "";
+    if (pf) { convertingFrom = null; $("convNote").classList.add("hidden"); renderPfList(); }
+    recalc();
+  }
+  $("dtReceipt").onclick = () => setDocMode("receipt");
+  $("dtPf").onclick = () => setDocMode("pf");
+  const pfExpired = (f) => new Date(f.validUntil) < new Date(new Date().toDateString());
+  const pfStatus = (f) => f.receiptNo ? "Sold, receipt " + f.receiptNo : (pfExpired(f) ? "Expired " : "Valid until ") + fmtDate(f.validUntil);
+  const longDate = (d) => new Date(d).toLocaleDateString("en-GH", { dateStyle: "medium" });
+  function pfText(f) {
+    const L = [];
+    header(L);
+    L.push("PRO FORMA INVOICE");
+    L.push("No. " + f.no);
+    L.push("Date: " + longDate(f.date));
+    L.push("Valid until: " + longDate(f.validUntil));
+    L.push("For: " + f.customer.name);
+    if (f.customer.phone) L.push("Phone: " + f.customer.phone);
+    L.push("------------------------------");
+    f.items.forEach(i => { L.push(i.name); L.push(`  ${i.qty} x ${cedi(i.price)} = ${cedi(i.qty * i.price)}`); });
+    L.push("------------------------------");
+    L.push("Subtotal: " + cedi(f.subtotal));
+    if (f.discount) L.push("Discount: -" + cedi(f.discount));
+    if (f.tax) L.push(`VAT & levies (${f.vatRate}%): ${cedi(f.tax)}`);
+    L.push("TOTAL: " + cedi(f.total));
+    L.push("");
+    L.push("This is a quote, not a receipt or tax invoice. No payment has been received. Prices may change after the date above.");
+    if (shop.footer) { L.push(""); L.push(shop.footer); }
+    return L.join("\n");
+  }
+  const pfSms = (f) => `${shop.name || "Pro forma"}: pro forma ${f.no} for ${f.customer.name}, ${f.items.length} item${f.items.length > 1 ? "s" : ""}, total ${cedi(f.total)}, valid until ${fmtDate(f.validUntil)}. Not a receipt.`;
+  const pfPdf = (f) => makePdf(`${bizName()} Pro forma ${f.no}`, pfText(f), `${fileBiz()}-Proforma-${f.no}.pdf`);
+  const pfMessage = (f, pdf) => ({
+    title: `${bizName()} · Pro forma ${f.no}`, text: pfText(f), sms: pfSms(f),
+    subject: `Pro forma invoice ${f.no} from ${shop.name || "us"}`,
+    phone: f.customer.phone, email: f.customer.email, pdf,
+    onSent: (ch) => { f.sentVia = f.sentVia || []; if (!f.sentVia.includes(ch)) { f.sentVia.push(ch); f.at = Date.now(); savePf(); } }
+  });
+  function makeProforma(items, t, name, phoneRaw) {
+    if (!name) return $("err").textContent = "Add the customer's name. A pro forma is made out to someone.";
+    const days = Math.min(Math.max(parseInt($("pfDays").value, 10) || 14, 1), 365);
+    const now = new Date(), until = new Date(now);
+    until.setDate(until.getDate() + days);
+    const n = store.get("fseq", 0) + 1;
+    const f = {
+      id: b64url(crypto.getRandomValues(new Uint8Array(9))), no: "PF-" + String(n).padStart(5, "0"),
+      date: now.toISOString(), validUntil: until.toISOString(),
+      customer: { name, phone: phoneRaw, email: $("cEmail").value.trim() },
+      items: items.map(({ name, qty, price }) => ({ name, qty, price })),
+      ...t, vatRate: shop.vat ? shop.vatRate : 0, receiptNo: null, sentVia: [], at: Date.now()
+    };
+    let pdf;
+    try { pdf = pfPdf(f); }
+    catch (e) { console.error(e); return $("err").textContent = "Couldn't make the PDF, so the pro forma was not created. (" + e.message + ")"; }
+    store.set("fseq", n);
+    proformas.unshift(f); savePf();
+    openMessage(pfMessage(f, pdf));
+  }
+  function renderPfList() {
+    const ul = $("pfList");
+    ul.innerHTML = proformas.length ? "" : `<li class="note">No pro formas yet. Add items and the customer above, then tap Create pro forma.</li>`;
+    proformas.slice(0, 30).forEach(f => {
+      const li = document.createElement("li");
+      li.innerHTML = `<span class="grow"><b>${esc(f.no)}</b> · ${esc(f.customer.name)}<br><span class="note">${cedi(f.total)} · ${esc(pfStatus(f))}</span></span>
+        <button class="small">Send</button>${f.receiptNo ? "" : `<button class="small">Sell</button>`}`;
+      const [send, sell] = li.querySelectorAll("button");
+      send.onclick = () => {
+        try { openMessage(pfMessage(f, pfPdf(f))); } catch (e) { $("err").textContent = "Couldn't make the PDF. (" + e.message + ")"; }
+      };
+      if (sell) sell.onclick = () => convertPf(f);
+      ul.appendChild(li);
+    });
+  }
+  // Turning a pro forma into a sale fills the Sell screen with its items, customer and agreed prices.
+  function convertPf(f) {
+    setDocMode("receipt");
+    resetForm();
+    f.items.forEach(i => addItem(i.name, i.qty, i.price));
+    $("cName").value = f.customer.name || ""; $("cPhone").value = f.customer.phone || ""; $("cEmail").value = f.customer.email || "";
+    $("discount").value = f.discount || 0;
+    convertingFrom = f.id;
+    const n = $("convNote");
+    n.className = pfExpired(f) ? "warn mb" : "ok";
+    n.textContent = `Selling pro forma ${f.no} for ${f.customer.name}.` + (pfExpired(f) ? ` It expired on ${fmtDate(f.validUntil)}, so check the prices first.` : " Take the payment, then tap Create receipt.");
+    recalc(); window.scrollTo(0, 0);
   }
 
   // ---------- owing ----------
@@ -1608,8 +1738,43 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     $("sVat").checked = !!shop.vat; $("sVatRate").value = shop.vatRate ?? 20;
     $("vatBox").classList.toggle("hidden", !shop.vat);
     $("savedNote").textContent = "";
+    renderLogo();
     renderAccess();
   }
+  // Logo: shrunk to at most 320 px and saved as a small JPEG, so it fits in the PDF and syncs quickly.
+  function renderLogo() {
+    $("logoBox").innerHTML = logo
+      ? `<img class="logo-prev" src="${logo.data}" alt="Your logo"><span class="send2" style="display:flex;gap:8px"><button class="small" id="logoPick">Change logo</button><button class="small" id="logoDel">Remove</button></span>`
+      : `<button id="logoPick">Add your logo</button>`;
+    $("logoPick").onclick = () => $("sLogo").click();
+    if (logo) $("logoDel").onclick = () => { if (confirm("Remove the logo from receipts?")) { logo = null; store.set("logo", null); renderLogo(); $("logoNote").textContent = "Logo removed."; } };
+  }
+  function shrinkLogo(file) {
+    return new Promise((ok, bad) => {
+      const img = new Image(), url = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const k = Math.min(1, 320 / Math.max(img.naturalWidth, img.naturalHeight));
+        const w = Math.max(1, Math.round(img.naturalWidth * k)), h = Math.max(1, Math.round(img.naturalHeight * k));
+        const c = Object.assign(document.createElement("canvas"), { width: w, height: h }), g = c.getContext("2d");
+        g.fillStyle = "#fff"; g.fillRect(0, 0, w, h); g.drawImage(img, 0, 0, w, h);   // white behind see-through logos
+        let q = 0.85, data = c.toDataURL("image/jpeg", q);
+        while (data.length > 40000 && q > 0.4) { q -= 0.15; data = c.toDataURL("image/jpeg", q); }
+        ok({ data, w, h });
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); bad(new Error("Kontaa can't read that file. Choose a photo or a JPG or PNG picture.")); };
+      img.src = url;
+    });
+  }
+  $("sLogo").onchange = async () => {
+    const file = $("sLogo").files[0]; $("sLogo").value = "";
+    if (!file) return;
+    $("logoNote").textContent = "Saving logo…";
+    try {
+      logo = await shrinkLogo(file); store.set("logo", logo); renderLogo();
+      $("logoNote").textContent = "Logo saved. It now shows at the top of every receipt and pro forma.";
+    } catch (e) { $("logoNote").textContent = e.message; }
+  };
   $("sVat").onchange = () => $("vatBox").classList.toggle("hidden", !$("sVat").checked);
   $("saveShop").onclick = () => {
     if (!$("sName").value.trim()) { $("savedNote").textContent = "Enter your business name. It goes at the top of every receipt."; return $("sName").focus(); }
@@ -1637,10 +1802,10 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   let sync = store.get("sync", null);         // { shop, key, token, role: "counter"|"owner", seq, at:{}, last, creator }
   let pushed = store.get("syncPushed", {});    // record key -> fingerprint of what this phone last sent
   let applyingRemote = false, syncTimer = null, syncing = false, syncAgain = false, syncErr = "";
-  const SYNCED = { receipts: 1, products: 1, payReceipts: 1, closings: 1, shop: 1, pin: 1 };
+  const SYNCED = { receipts: 1, products: 1, payReceipts: 1, closings: 1, shop: 1, pin: 1, logo: 1, proformas: 1 };
   onStoreSet = (k) => {
     if (applyingRemote || !SYNCED[k] || !sync) return;
-    if (k === "products" || k === "shop" || k === "pin") { sync.at[k] = Date.now(); store.set("sync", sync); }
+    if (k === "products" || k === "shop" || k === "pin" || k === "logo") { sync.at[k] = Date.now(); store.set("sync", sync); }
     clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, 1500);
   };
   const fromB64 = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
@@ -1683,6 +1848,8 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     history.forEach(r => out["r:" + (r.code || r.no)] = r);
     payReceipts.forEach(p => out["p:" + (p.code || p.no)] = p);
     closings.forEach(c => out["c:" + c.code] = c);
+    proformas.forEach(f => out["f:" + f.id] = f);
+    out["logo"] = { at: sync.at.logo || 0, logo };   // its own record, so editing shop details doesn't resend the picture
     out["products"] = { at: sync.at.products || 0, list: products };
     out["shop"] = { at: sync.at.shop || 0, shop };
     out["pin"] = { at: sync.at.pin || 0, pin: store.get("pin", null) };
@@ -1710,6 +1877,12 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       store.set("pseq", Math.max(store.get("pseq", 0), parseInt(String(v.no).replace(/\D/g, ""), 10) || 0));
     } else if (k.startsWith("c:")) {
       if (!closings.some(c => c.code === v.code)) closings.push(v);
+    } else if (k.startsWith("f:")) {
+      const i = proformas.findIndex(f => "f:" + f.id === k);
+      if (i < 0) proformas.push(v);
+      else { const a = proformas[i]; proformas[i] = { ...((v.at || 0) > (a.at || 0) ? v : a), sentVia: [...new Set([...(a.sentVia || []), ...(v.sentVia || [])])] }; }
+      store.set("fseq", Math.max(store.get("fseq", 0), parseInt(String(v.no).replace(/\D/g, ""), 10) || 0));
+    } else if (k === "logo" && v.at > (sync.at.logo || 0)) { logo = v.logo; sync.at.logo = v.at;
     } else if (k === "products" && v.at > (sync.at.products || 0)) { products = v.list; sync.at.products = v.at; }
     else if (k === "shop" && v.at > (sync.at.shop || 0)) { shop = v.shop; sync.at.shop = v.at; }
     else if (k === "pin" && v.at > (sync.at.pin || 0)) { store.set("pin", v.pin); sync.at.pin = v.at; }
@@ -1734,7 +1907,9 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
             history.sort((a, b) => a.date < b.date ? 1 : -1);
             payReceipts.sort((a, b) => a.date < b.date ? 1 : -1);
             closings.sort((a, b) => a.made < b.made ? 1 : -1);
+            proformas.sort((a, b) => a.date < b.date ? 1 : -1);
             saveHistory(); saveProducts(); store.set("payReceipts", payReceipts); store.set("closings", closings); store.set("shop", shop);
+            savePf(); store.set("logo", logo);
           } finally { applyingRemote = false; }
           sync.seq = Math.max(sync.seq || 0, ...rows.map(r => r.seq));
           got += rows.length;
@@ -1755,7 +1930,11 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       }
       sync.last = Date.now(); syncErr = "";
       store.set("sync", sync); store.set("syncPushed", pushed);
-      if (got) { updateBadge(); if (["history", "owing", "products"].includes(currentView)) show(currentView, true); }
+      if (got) {
+        updateBadge(); if (["history", "owing", "products"].includes(currentView)) show(currentView, true);
+        if (currentView === "new" && docMode === "pf") renderPfList();
+        if (currentView === "settings") renderLogo();
+      }
     } catch (e) {
       syncErr = navigator.onLine ? (e.name === "AbortError" ? "The connection is slow." : e.message) : "No internet.";
       store.set("sync", sync); store.set("syncPushed", pushed);
@@ -1898,7 +2077,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       const shopId = b64url(crypto.getRandomValues(new Uint8Array(9)));
       const token = await tokenFor(key);
       await rpc("create_shop", { p_shop: shopId, p_token: token });
-      sync = { shop: shopId, key, token, role: "counter", seq: 0, at: { products: Date.now(), shop: Date.now(), pin: Date.now() }, last: 0, creator: true };
+      sync = { shop: shopId, key, token, role: "counter", seq: 0, at: { products: Date.now(), shop: Date.now(), pin: Date.now(), logo: Date.now() }, last: 0, creator: true };
       cryptoKey = null; pushed = {};
       store.set("sync", sync);
       await syncNow();
