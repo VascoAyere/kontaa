@@ -143,6 +143,7 @@
       <datalist id="custList"></datalist>
       <datalist id="prodNames"></datalist>
       <div style="margin-top:10px"><label for="cEmail">Email (optional)</label><input id="cEmail" type="email" inputmode="email"></div>
+      <div style="margin-top:10px" class="hidden" id="cAddrBox"><label for="cAddr">Client's address (optional)</label><input id="cAddr" autocomplete="off" placeholder="e.g. P.O. Box 12, Winneba"></div>
     </div>
 
     <div class="card no-print">
@@ -1319,7 +1320,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 
   function resetForm() {
     convertingFrom = null; $("convNote").classList.add("hidden");
-    ["cName", "cPhone", "cEmail", "payRef", "paidNow", "prodSearch"].forEach(id => $(id).value = "");
+    ["cName", "cPhone", "cEmail", "cAddr", "payRef", "paidNow", "prodSearch"].forEach(id => $(id).value = "");
     $("discount").value = 0;
     $("items").innerHTML = "";
     recalc();
@@ -1344,7 +1345,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     docMode = m;
     const pf = m === "pf";
     $("dtReceipt").classList.toggle("on", !pf); $("dtPf").classList.toggle("on", pf);
-    ["pfBox", "pfIntro", "pfListCard"].forEach(id => $(id).classList.toggle("hidden", !pf));
+    ["pfBox", "pfIntro", "pfListCard", "cAddrBox"].forEach(id => $(id).classList.toggle("hidden", !pf));
     $("payBox").classList.toggle("hidden", pf); $("payMethod").parentElement.classList.toggle("hidden", pf);
     $("payH2").textContent = pf ? "Total" : "Payment";
     $("makeReceipt").textContent = pf ? "Create pro forma" : "Create receipt";
@@ -1365,6 +1366,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     L.push("Date: " + longDate(f.date));
     L.push("Valid until: " + longDate(f.validUntil));
     L.push("For: " + f.customer.name);
+    if (f.customer.addr) L.push("Address: " + f.customer.addr);
     if (f.customer.phone) L.push("Phone: " + f.customer.phone);
     L.push("------------------------------");
     f.items.forEach(i => { L.push(i.name); L.push(`  ${i.qty} x ${cedi(i.price)} = ${cedi(i.qty * i.price)}`); });
@@ -1379,7 +1381,124 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     return L.join("\n");
   }
   const pfSms = (f) => `${shop.name || "Pro forma"}: pro forma ${f.no} for ${f.customer.name}, ${f.items.length} item${f.items.length > 1 ? "s" : ""}, total ${cedi(f.total)}, valid until ${fmtDate(f.validUntil)}. Not a receipt.`;
-  const pfPdf = (f) => makePdf(`${bizName()} Pro forma ${f.no}`, pfText(f), `${fileBiz()}-Proforma-${f.no}.pdf`);
+  const pfPdf = (f) => invoicePdf(f, `${bizName()} Pro forma ${f.no}`, `${fileBiz()}-Proforma-${f.no}.pdf`);
+  // Full A4 page laid out like a printed invoice book: logo and shop details on top, the
+  // document name in a green box, client and dates, an item table, totals and signature lines.
+  function invoicePdf(f, title, filename) {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: "mm", format: "a4",
+      encryption: { userPassword: "", ownerPassword: secret + Date.now(), userPermissions: ["print"] } });
+    doc.setProperties({ title, author: shop.name || "Kontaa", creator: "Kontaa" });
+    const W = 210, M = 15, R = W - M, green = [14, 107, 92], ink = [43, 29, 20], muted = [107, 90, 74];
+    const num = (n) => r2(n).toLocaleString("en-GH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const pdfText = (t) => String(t ?? "").replace(/GH₵/g, "GHS ").replace(/[^\x20-\xFF]/g, "");
+    const color = (c) => doc.setTextColor(c[0], c[1], c[2]);
+    // Header: logo, shop name, details
+    let x = M, y = M;
+    if (logo && logo.data) {
+      const k = Math.min(30 / logo.w, 26 / logo.h), lw = logo.w * k, lh = logo.h * k;
+      doc.addImage(logo.data, "JPEG", M, M, lw, lh);
+      x = M + lw + 5;
+    }
+    const boxW = 62, nameW = R - boxW - 4 - x;
+    doc.setFont("helvetica", "bold"); doc.setFontSize(20); color(green);
+    const nameLines = doc.splitTextToSize(pdfText(shop.name || "My Shop"), nameW);
+    nameLines.forEach((l, i) => doc.text(l, x, y + 7 + i * 8));
+    y += 7 + nameLines.length * 8 - 2;
+    doc.setFont("helvetica", "normal"); doc.setFontSize(9.5); color(ink);
+    [shop.addr, shop.gps && "GPS: " + shop.gps, shop.phone && "Tel: " + shop.phone, shop.email, shop.tin && "TIN: " + shop.tin]
+      .filter(Boolean).forEach(l => doc.splitTextToSize(pdfText(l), nameW).forEach(t => { doc.text(t, x, y); y += 4.6; }));
+    // Document name box and its numbers
+    doc.setFillColor(green[0], green[1], green[2]); doc.rect(R - boxW, M + 2, boxW, 11, "F");
+    doc.setFont("helvetica", "bold"); doc.setFontSize(13); doc.setTextColor(255, 255, 255);
+    doc.text("PRO FORMA INVOICE", R - boxW / 2, M + 9.4, { align: "center" });
+    doc.setFontSize(9.5); color(ink);
+    [["No.", f.no], ["Date", longDate(f.date)], ["Valid until", longDate(f.validUntil)]].forEach(([k, v], i) => {
+      doc.setFont("helvetica", "bold"); doc.text(k + ":", R - boxW, M + 20 + i * 5.2);
+      doc.setFont("helvetica", "normal"); doc.text(pdfText(v), R, M + 20 + i * 5.2, { align: "right" });
+    });
+    y = Math.max(y, M + 36, logo ? M + 30 : 0) + 4;
+    doc.setDrawColor(green[0], green[1], green[2]); doc.setLineWidth(0.6); doc.line(M, y, R, y);
+    // Client
+    y += 7;
+    doc.setFont("helvetica", "bold"); doc.setFontSize(10); doc.text("Client's name & address:", M, y);
+    doc.setFont("helvetica", "normal");
+    const client = [f.customer.name, f.customer.addr, f.customer.phone && "Tel: " + f.customer.phone, f.customer.email].filter(Boolean);
+    client.forEach((l, i) => doc.text(pdfText(l), M + 46, y + i * 5));
+    y += Math.max(1, client.length) * 5 + 4;
+    // Item table
+    const cols = [{ t: "Qty", w: 18, a: "center" }, { t: "Description", w: 92, a: "left" }, { t: "Unit Price", w: 35, a: "right" }, { t: "Amount GHS", w: 35, a: "right" }];
+    const cx = []; cols.reduce((acc, c) => (cx.push(acc), acc + c.w), M);
+    const head = () => {
+      doc.setFillColor(green[0], green[1], green[2]); doc.rect(M, y, R - M, 8, "F");
+      doc.setFont("helvetica", "bold"); doc.setFontSize(10); doc.setTextColor(255, 255, 255);
+      cols.forEach((c, i) => doc.text(c.t, c.a === "center" ? cx[i] + c.w / 2 : c.a === "right" ? cx[i] + c.w - 2 : cx[i] + 2, y + 5.4, { align: c.a }));
+      y += 8; doc.setFont("helvetica", "normal"); color(ink);
+    };
+    const grid = (top, h) => {
+      doc.setDrawColor(150, 150, 150); doc.setLineWidth(0.2);
+      doc.rect(M, top, R - M, h);
+      cx.slice(1).forEach(v => doc.line(v, top, v, top + h));
+    };
+    head();
+    const rows = f.items.map(i => ({ qty: String(i.qty), desc: doc.splitTextToSize(pdfText(i.name), cols[1].w - 4), price: num(i.price), amt: num(i.qty * i.price) }));
+    while (rows.length < 8) rows.push(null);   // a few empty lines, like the printed book
+    rows.forEach(r => {
+      const h = r ? Math.max(8, r.desc.length * 4.6 + 3.4) : 8;
+      if (y + h > 297 - 22) { doc.addPage(); y = M; head(); }
+      grid(y, h);
+      if (r) {
+        doc.setFontSize(10);
+        doc.text(r.qty, cx[0] + cols[0].w / 2, y + 5.4, { align: "center" });
+        r.desc.forEach((l, j) => doc.text(l, cx[1] + 2, y + 5.4 + j * 4.6));
+        doc.text(r.price, cx[2] + cols[2].w - 2, y + 5.4, { align: "right" });
+        doc.text(r.amt, cx[3] + cols[3].w - 2, y + 5.4, { align: "right" });
+      }
+      y += h;
+    });
+    // Totals under the last two columns
+    if (y > 297 - 105) { doc.addPage(); y = M; }   // keep totals, note and signatures together
+    const tot = [["Subtotal", f.subtotal]];
+    if (f.discount) tot.push(["Discount", -f.discount]);
+    if (f.tax) tot.push([`VAT & levies (${f.vatRate}%)`, f.tax]);
+    tot.push(["Total GHS", f.total]);
+    tot.forEach(([k, v], i) => {
+      const last = i === tot.length - 1;
+      if (last) { doc.setFillColor(232, 243, 239); doc.rect(cx[2], y, cols[2].w + cols[3].w, 9, "F"); }
+      doc.setDrawColor(150, 150, 150); doc.rect(cx[2], y, cols[2].w + cols[3].w, last ? 9 : 7); doc.line(cx[3], y, cx[3], y + (last ? 9 : 7));
+      doc.setFont("helvetica", last ? "bold" : "normal"); doc.setFontSize(last ? 11 : 10); last ? color(green) : color(ink);
+      doc.text(k, cx[2] + 2, y + (last ? 6 : 5));
+      doc.text((v < 0 ? "-" : "") + num(Math.abs(v)), R - 2, y + (last ? 6 : 5), { align: "right" });
+      y += last ? 9 : 7;
+    });
+    // Note, signatures, footer
+    y += 8; doc.setFont("helvetica", "italic"); doc.setFontSize(9); color(muted);
+    doc.splitTextToSize("This is a pro forma invoice: a quote, not a receipt or tax invoice. No payment has been received. Prices are valid until " + longDate(f.validUntil) + ".", R - M)
+      .forEach(l => { doc.text(l, M, y); y += 4.4; });
+    y = Math.max(y + 18, 297 - 48);
+    doc.setFont("helvetica", "bold"); doc.setFontSize(10); color(ink);
+    doc.text("Customer's Signature", M, y); doc.text("Manager's Signature", R - 70, y);
+    doc.setLineDashPattern([0.6, 0.8], 0); doc.setDrawColor(90, 90, 90); doc.setLineWidth(0.3);
+    doc.line(M, y + 12, M + 70, y + 12); doc.line(R - 70, y + 12, R, y + 12);
+    doc.setLineDashPattern([], 0);
+    y += 22;
+    doc.setFont("helvetica", "normal"); doc.setFontSize(9.5); color(ink);
+    if (shop.footer) doc.text(pdfText(shop.footer), W / 2, y, { align: "center" });
+    // "Made with Kontaa", same small mark as on receipts
+    const lx = W / 2 - 22, ly = 297 - 10, sz = 4;
+    doc.setFillColor(14, 107, 92); doc.roundedRect(lx, ly, sz, sz, 0.9, 0.9, "F");
+    doc.setFillColor(251, 247, 238); doc.rect(lx + 1.1, ly + 0.7, 1.8, 2.5, "F");
+    doc.setDrawColor(232, 163, 23); doc.setLineWidth(0.45);
+    doc.line(lx + 1.3, ly + 2.2, lx + 1.8, ly + 2.7); doc.line(lx + 1.8, ly + 2.7, lx + 2.8, ly + 1.6);
+    doc.setFontSize(7.5); color(muted);
+    doc.text("Made with Kontaa · Every sale counted", lx + sz + 1.5, ly + 2.9);
+    const pages = doc.getNumberOfPages();
+    if (pages > 1) for (let i = 1; i <= pages; i++) {
+      doc.setPage(i); doc.setFont("helvetica", "normal"); doc.setFontSize(8); color(muted);
+      doc.text(`${pdfText(f.no)} · Page ${i} of ${pages}`, R, 297 - 8, { align: "right" });
+    }
+    return { blob: doc.output("blob"), name: filename };
+  }
   const pfMessage = (f, pdf) => ({
     title: `${bizName()} · Pro forma ${f.no}`, text: pfText(f), sms: pfSms(f),
     subject: `Pro forma invoice ${f.no} from ${shop.name || "us"}`,
@@ -1395,7 +1514,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     const f = {
       id: b64url(crypto.getRandomValues(new Uint8Array(9))), no: "PF-" + String(n).padStart(5, "0"),
       date: now.toISOString(), validUntil: until.toISOString(),
-      customer: { name, phone: phoneRaw, email: $("cEmail").value.trim() },
+      customer: { name, phone: phoneRaw, email: $("cEmail").value.trim(), addr: $("cAddr").value.trim() },
       items: items.map(({ name, qty, price }) => ({ name, qty, price })),
       ...t, vatRate: shop.vat ? shop.vatRate : 0, receiptNo: null, sentVia: [], at: Date.now()
     };
