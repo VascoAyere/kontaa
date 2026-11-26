@@ -296,6 +296,7 @@
       <button class="primary full" id="saveShop" style="margin-top:12px">Save</button>
       <p class="note" id="savedNote"></p>
     </div>
+    <p class="note" style="text-align:center;margin:0 0 12px">Kontaa version 26 Nov 2026 (full-page pro forma)</p>
     <div class="card" id="accessCard">
       <h2>Owner access</h2>
       <div id="accessBody"></div>
@@ -2250,6 +2251,11 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 
   // ---------- start ----------
   if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) navigator.serviceWorker.register("sw.js").catch(() => {});
+  // When a new version takes over this page, reload once so the update shows straight away.
+  if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener("controllerchange", () => { if (!reloaded) { reloaded = true; location.reload(); } });
+  }
   saveHistory();
   updateBadge();
   recalc();
